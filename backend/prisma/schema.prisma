@@ -1,0 +1,210 @@
+// Prisma schema — FinDash.
+//
+// Convenciones:
+//  - Tablas y columnas en snake_case en Postgres (@map / @@map); camelCase
+//    en el código TS/Prisma Client — es la convención estándar de Prisma.
+//  - IDs son UUID (String @id @default(uuid())), no autoincrement: no
+//    filtran el conteo de filas (relevante para account/transaction IDs
+//    expuestos en la API) y se pueden generar en el dominio antes de
+//    persistir si en el futuro se necesita.
+//  - Todo monto de dinero es Decimal, nunca Float: un Float de 64 bits usa
+//    representación binaria IEEE 754 y no puede representar exactamente la
+//    mayoría de valores decimales (ej. 19.99), lo que produce errores de
+//    redondeo que se acumulan en balance/comisión — inaceptable en un
+//    sistema financiero. Decimal se mapea a NUMERIC de Postgres (precisión
+//    exacta, aritmética decimal). Se usa Decimal(14,2): hasta
+//    999,999,999,999.99, más que suficiente para esta demo.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  CLIENT
+}
+
+/// RN-03 (ARCHITECTURE.md 3.1, Strategy + Factory de comisiones). Agregar un
+/// tipo nuevo (ej. VIP) es una migración aditiva de una sola línea
+/// (`ALTER TYPE "AccountType" ADD VALUE 'VIP'`) más una Strategy + un case
+/// en el Factory — nunca una columna nueva en Account. Eso es justamente lo
+/// que hace este campo compatible con Open/Closed a nivel de schema.
+enum AccountType {
+  BASIC
+  PREMIUM
+  CORPORATE
+}
+
+enum AccountStatus {
+  ACTIVE
+  BLOCKED
+}
+
+/// COMPLETED: transferencia autorizada y aplicada.
+/// REJECTED:  rechazada por una regla de negocio, con la cuenta origen ya
+///            resuelta (fondos insuficientes, misma cuenta, destino
+///            inexistente) — el request llegó a validarse contra el
+///            dominio, y esa validación decidió que no procedía.
+/// FAILED:    no se pudo completar por una falla técnica/externa ajena a
+///            la validación de negocio (ej. timeout del servicio
+///            anti-fraude simulado, RN-02).
+/// Ver PROGRESS.md (Sesión 6.5) para la clasificación completa,
+/// excepción por excepción, incluyendo el único caso que NO genera fila
+/// (NoOriginAccountException — no hay ninguna cuenta origen real a la
+/// cual atar la fila).
+enum TransactionStatus {
+  COMPLETED
+  REJECTED
+  FAILED
+}
+
+model User {
+  id           String @id @default(uuid())
+  email        String @unique
+  passwordHash String @map("password_hash")
+
+  /// RF-03: documento de identidad (cédula/DNI/RUC) de la persona — es el
+  /// campo por el que el admin filtra/busca cuentas ("por Documento"), a
+  /// diferencia de `Account.accountNumber` (identificador de la cuenta en
+  /// sí, no de la persona). Único porque una persona no debería poder tener
+  /// más de un usuario con el mismo documento.
+  documentNumber String @unique @map("document_number")
+
+  role      Role     @default(CLIENT)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  accounts Account[]
+
+  @@map("users")
+}
+
+model Account {
+  id     String @id @default(uuid())
+  userId String @map("user_id")
+
+  /// Identificador de negocio de la cuenta (lo que un cliente/operador
+  /// escribe para buscarla) — no confundir con `id` (PK técnica interna).
+  accountNumber String @unique @map("account_number")
+
+  balance     Decimal       @default(0) @db.Decimal(14, 2)
+  accountType AccountType   @map("account_type")
+  status      AccountStatus @default(ACTIVE)
+
+  /// RF-04: null = el frontend debe mostrar el placeholder/skeleton en vez
+  /// de intentar cargar una imagen rota.
+  avatarUrl String? @map("avatar_url")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // onDelete: Restrict — nunca se debe poder borrar un usuario que todavía
+  // tiene cuentas (y por lo tanto, potencialmente, historial financiero).
+  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  outgoingTransactions Transaction[] @relation("TransactionOrigin")
+  incomingTransactions Transaction[] @relation("TransactionDest")
+
+  // RF-03: listado paginado con filtro por documento y por status. El filtro
+  // por documento busca en User.documentNumber (ver ese modelo — la cuenta
+  // se llega por el join accounts.user_id -> users.id, ya indexado) y por
+  // status usa este índice. userId no tiene índice automático en Postgres
+  // solo por ser FK — Prisma no lo crea salvo que se declare explícitamente,
+  // así que va aquí.
+  @@index([status])
+  @@index([userId, status])
+  @@map("accounts")
+}
+
+model Transaction {
+  id String @id @default(uuid())
+
+  originAccountId String @map("origin_account_id")
+
+  /// Nullable desde la Sesión 6.5 (RF-07, auditoría de fallidas/rechazadas):
+  /// `DestinationAccountNotFoundException`/`AntiFraudTimeoutException`
+  /// pueden generar una fila de auditoría sin que la cuenta destino se haya
+  /// confirmado como existente — un FK no-nulo no podría apuntar a un id
+  /// que quizás no es una cuenta real. Se guarda NULL, no el id crudo del
+  /// request, en esos dos casos — ver la clasificación completa en
+  /// PROGRESS.md (Sesión 6.5) y el comentario de CreateTransferUseCase.
+  destAccountId String? @map("dest_account_id")
+
+  amount Decimal @db.Decimal(14, 2)
+
+  /// Nullable desde la Sesión 6.5: la comisión se calcula recién después de
+  /// resolver la cuenta destino y su Strategy (RN-03) — una fila
+  /// REJECTED/FAILED que aborta antes de ese punto (destino inexistente,
+  /// timeout de anti-fraude, misma cuenta) no tiene ningún valor real que
+  /// guardar acá. `InsufficientFundsException`, en cambio, ocurre DESPUÉS
+  /// de calcular la comisión, así que esa fila sí la persiste.
+  commission Decimal? @db.Decimal(14, 2)
+
+  /// Nulo hasta que la transacción se autoriza (ver CreateTransferUseCase,
+  /// ARCHITECTURE.md 3.2): el código se genera después de validar fondos,
+  /// así que una transacción REJECTED por fondos insuficientes nunca llega
+  /// a tener uno. @unique + nullable es válido en Postgres: NULL nunca
+  /// colisiona con NULL bajo un UNIQUE constraint, así que puede haber
+  /// múltiples REJECTED/FAILED sin código a la vez.
+  authorizationCode String? @unique @map("authorization_code")
+
+  status TransactionStatus
+
+  /// Nullable desde la Sesión 6.5. RN-01 — red de seguridad a nivel de fila
+  /// (ARCHITECTURE.md 3.4). Ver la decisión de modelado sobre la relación
+  /// con IdempotencyKey documentada en PROGRESS.md (Sesión 1). Las filas
+  /// REJECTED/FAILED nunca guardan la key real del header acá — solo las
+  /// COMPLETED. Motivo (PROGRESS.md Sesión 6.5): si un primer intento con
+  /// la key X fallara (ej. fondos insuficientes) y persistiera esa key en
+  /// esta columna, un retry legítimo con la MISMA key X después de
+  /// corregir el problema violaría este mismo `@unique` al intentar crear
+  /// la fila COMPLETED — el propio mecanismo de auditoría bloquearía el
+  /// retry que la idempotencia (Sesión 5) está diseñada para permitir.
+  /// Guardando NULL en las filas fallidas, ese conflicto no puede ocurrir
+  /// (NULL nunca colisiona con NULL ni con ningún otro valor bajo UNIQUE).
+  idempotencyKey String? @unique @map("idempotency_key")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // onDelete: Restrict en ambos lados — el historial de transacciones es un
+  // registro de auditoría, nunca debe poder desaparecer por borrar una
+  // cuenta. destAccount es opcional (ver destAccountId arriba) — sin
+  // "fields" no-nulos, Prisma/Postgres simplemente no aplican el FK cuando
+  // el valor es NULL.
+  originAccount Account  @relation("TransactionOrigin", fields: [originAccountId], references: [id], onDelete: Restrict)
+  destAccount   Account? @relation("TransactionDest", fields: [destAccountId], references: [id], onDelete: Restrict)
+
+  idempotencyRecord IdempotencyKey?
+
+  @@index([originAccountId])
+  @@index([destAccountId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("transactions")
+}
+
+/// Infraestructura para RN-01 (idempotencia) — ver ARCHITECTURE.md 3.4 y la
+/// decisión de modelado documentada en PROGRESS.md (Sesión 1): esta tabla es
+/// la "caché" que consulta el IdempotencyInterceptor ANTES de invocar el use
+/// case; `transactions.idempotency_key` (arriba) es la segunda capa,
+/// independiente, a nivel de fila.
+model IdempotencyKey {
+  id  String @id @default(uuid())
+  key String @unique
+
+  /// Nulo mientras el interceptor reclama la key (INSERT inicial, antes de
+  /// ejecutar el use case) y hasta que la Transaction termina de crearse.
+  /// Se completa (UPDATE) una sola vez, cuando el use case devuelve el
+  /// resultado. @unique porque es una relación 1:1 opcional.
+  transactionId String?      @unique @map("transaction_id")
+  transaction   Transaction? @relation(fields: [transactionId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("idempotency_keys")
+}

@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: findash-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: findash
+      POSTGRES_PASSWORD: findash_dev_password
+      POSTGRES_DB: findash
+    # 5433 en el host (no 5432): evita colisionar con un Postgres nativo que
+    # ya pueda estar corriendo en la máquina del desarrollador. El contenedor
+    # sigue escuchando en 5432 puertas adentro; `backend` lo alcanza por el
+    # nombre de servicio `postgres`, no por este puerto de host.
+    ports:
+      - "5433:5432"
+    volumes:
+      - findash-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U findash -d findash"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: findash-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgresql://findash:findash_dev_password@postgres:5432/findash?schema=public"
+      PORT: 3000
+      NODE_ENV: production
+      # Secretos de dev únicamente (mismos valores que backend/.env.example)
+      # — nunca los reales de producción, esos viven en Secret Manager. Sin
+      # esto el AuthModule falla al arrancar (getOrThrow, sin fallback).
+      JWT_SECRET: "dev-only-3610e205372f5b55f164ab9d66da99dc6dfa02d55101096e1ab19bbce1728f"
+      JWT_REFRESH_SECRET: "dev-only-31a5e41587c0cd26fff19eca7ec40d1383007fed5ee53106ed7fd6193c699c"
+      JWT_ACCESS_EXPIRES_IN: 15m
+      JWT_REFRESH_EXPIRES_IN: 7d
+    ports:
+      - "3000:3000"
+
+volumes:
+  findash-postgres-data:

@@ -1,0 +1,145 @@
+# Pipeline de CI/CD para el backend de FinDash.
+#
+# Flujo: test -> build de imagen -> push a Artifact Registry -> deploy a Cloud Run.
+#
+# Variables de sustitución (todas con valor por defecto, sobreescribibles desde
+# el trigger de Cloud Build — ver checklist en README.md):
+#   _REGION            región de GCP (Cloud Run, Artifact Registry, Cloud SQL)
+#   _AR_REPO           nombre del repositorio de Artifact Registry
+#   _SERVICE_NAME      nombre del servicio de Cloud Run
+#   _CLOUDSQL_INSTANCE nombre de la instancia de Cloud SQL (sin el project:region)
+#   _DATABASE_URL_SECRET  nombre del secreto en Secret Manager con la DATABASE_URL
+#   _JWT_SECRET_NAME          nombre del secreto en Secret Manager con JWT_SECRET (Sesión 2)
+#   _JWT_REFRESH_SECRET_NAME  nombre del secreto en Secret Manager con JWT_REFRESH_SECRET (Sesión 2)
+
+substitutions:
+  _REGION: "us-central1"
+  _AR_REPO: "findash"
+  _SERVICE_NAME: "findash-backend"
+  _CLOUDSQL_INSTANCE: "findash-db"
+  _DATABASE_URL_SECRET: "DATABASE_URL"
+  _JWT_SECRET_NAME: "JWT_SECRET"
+  _JWT_REFRESH_SECRET_NAME: "JWT_REFRESH_SECRET"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  # 1. Instalar dependencias (con devDependencies, necesarias para test/build).
+  - id: install
+    name: node:22-alpine
+    dir: backend
+    entrypoint: npm
+    args: ["ci"]
+
+  # 2. Generar el Prisma Client (necesario para que compilen los tests y el build).
+  - id: prisma-generate
+    name: node:22-alpine
+    dir: backend
+    entrypoint: npm
+    args: ["run", "prisma:generate"]
+    waitFor: ["install"]
+
+  # 3a. Postgres efímero para los tests que necesitan una DB real (desde la
+  #     Sesión 3: PrismaAccountRepository verifica ahí mismo que el filtro
+  #     por documento hace un JOIN de verdad contra `users`, algo que un
+  #     mock nunca podría probar). Vive en la red `cloudbuild`, así que el
+  #     step `test` lo alcanza por el nombre del contenedor.
+  - id: test-db-up
+    name: gcr.io/cloud-builders/docker
+    args:
+      - run
+      - -d
+      - --network=cloudbuild
+      - --name=test-postgres
+      - -e
+      - POSTGRES_USER=findash
+      - -e
+      - POSTGRES_PASSWORD=findash_test_password
+      - -e
+      - POSTGRES_DB=findash_test
+      - postgres:16-alpine
+    waitFor: ["-"]
+
+  - id: test-db-wait
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        for i in $(seq 1 30); do
+          docker exec test-postgres pg_isready -U findash -d findash_test && exit 0
+          sleep 1
+        done
+        echo "test-postgres no respondió a tiempo" >&2
+        exit 1
+    waitFor: ["test-db-up"]
+
+  - id: test-migrate
+    name: node:22-alpine
+    dir: backend
+    entrypoint: npm
+    args: ["run", "prisma:migrate:deploy"]
+    env:
+      - "DATABASE_URL=postgresql://findash:findash_test_password@test-postgres:5432/findash_test?schema=public"
+    waitFor: ["install", "test-db-wait"]
+
+  # 3b. Tests unitarios + de integración.
+  #    Nota: el gate de cobertura del 80% (ver package.json > jest.coverageThreshold,
+  #    ARCHITECTURE.md sección 6) se activa en Cloud Build a partir de la Fase 6 del
+  #    roadmap, cuando exista cobertura real sobre todos los módulos de negocio.
+  #    Por ahora corremos "npm test" sin --coverage para no bloquear las sesiones
+  #    de desarrollo tempranas (Fases 1-5).
+  - id: test
+    name: node:22-alpine
+    dir: backend
+    entrypoint: npm
+    args: ["test"]
+    env:
+      - "DATABASE_URL=postgresql://findash:findash_test_password@test-postgres:5432/findash_test?schema=public"
+    waitFor: ["prisma-generate", "test-migrate"]
+
+  # 4. Build de la imagen Docker (multi-stage, ver backend/Dockerfile).
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    dir: backend
+    args:
+      - build
+      - "-t"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:${SHORT_SHA}"
+      - "-t"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:latest"
+      - "."
+    waitFor: ["test"]
+
+  # 5. Push a Artifact Registry.
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - "--all-tags"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}"
+    waitFor: ["build"]
+
+  # 6. Deploy a Cloud Run, conectado a Cloud SQL vía Unix socket (Cloud SQL Auth
+  #    Proxy integrado) y con DATABASE_URL / JWT_SECRET / JWT_REFRESH_SECRET
+  #    inyectados desde Secret Manager (AuthModule falla al arrancar sin
+  #    estos dos últimos — ver TokenService, sin fallback hardcodeado).
+  - id: deploy
+    name: gcr.io/cloud-builders/gcloud
+    args:
+      - run
+      - deploy
+      - "${_SERVICE_NAME}"
+      - "--image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:${SHORT_SHA}"
+      - "--region=${_REGION}"
+      - "--platform=managed"
+      - "--add-cloudsql-instances=${PROJECT_ID}:${_REGION}:${_CLOUDSQL_INSTANCE}"
+      - "--set-secrets=DATABASE_URL=${_DATABASE_URL_SECRET}:latest,JWT_SECRET=${_JWT_SECRET_NAME}:latest,JWT_REFRESH_SECRET=${_JWT_REFRESH_SECRET_NAME}:latest"
+      - "--set-env-vars=NODE_ENV=production,JWT_ACCESS_EXPIRES_IN=15m,JWT_REFRESH_EXPIRES_IN=7d"
+      - "--allow-unauthenticated"
+    waitFor: ["push"]
+
+images:
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:${SHORT_SHA}"
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_SERVICE_NAME}:latest"
