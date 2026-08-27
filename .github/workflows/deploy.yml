@@ -29,8 +29,14 @@ on:
   push:
     branches: [main]
 
+# Nota: `id-token: write` NO va acá a nivel de workflow completo — el job
+# `test` no llama a ninguna acción de AWS y no necesita ese permiso; sería
+# un over-grant innecesario (mismo criterio de mínimo privilegio que ya
+# rige, por ejemplo, en las policies IAM de aws-setup.sh, que apuntan a
+# ARNs específicos de Secrets Manager en vez de "*"). `id-token: write` se
+# declara solo en el job `build-and-push`, el único que corre
+# `aws-actions/configure-aws-credentials` — ver ese job más abajo.
 permissions:
-  id-token: write # requerido por aws-actions/configure-aws-credentials (OIDC)
   contents: read
 
 jobs:

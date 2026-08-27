@@ -367,6 +367,21 @@ Se eligió (a). Motivo principal, más allá del volumen de datos de esta demo (
 
 **Decisión de alcance consciente, no descuido:** no se corrió `git commit`/`git push` ni se ejecutó ningún comando de AWS (`create-service`, cambios de IAM) — el próximo paso de abajo es explícitamente manual, y esta sesión se mantuvo dentro de "preparar el pipeline y la documentación", no "ejecutar el despliegue".
 
+### Bug real encontrado en la primera corrida del pipeline (post-Sesión 8, mismo día) — `sts:AssumeRoleWithWebIdentity` no autorizado
+
+**No lo detectó ningún test** (no hay forma de que un test unitario/integración prediga el comportamiento de permisos de GitHub Actions) — se destapó recién corriendo el workflow de verdad contra GitHub y AWS reales, mismo patrón que otros bugs de esta bitácora (el header duplicado de Swagger en la Sesión 5, el bug de prefijos de la Sesión 4): solo aparecen al ejecutar el sistema real, no en la lógica que los tests pueden ejercitar.
+
+**Síntoma:** el job `build-and-push` falló en el step "Configurar credenciales de AWS (OIDC, sin access keys)" con:
+```
+Error: Could not assume role with OIDC: Not authorized to perform sts:AssumeRoleWithWebIdentity
+```
+
+**Causa:** el rol `findash-github-actions-deploy` y su trust policy (creados por `aws-setup.sh`) estaban correctos — el problema era que GitHub Actions nunca llegó a *emitir* el token OIDC que ese trust policy necesita verificar. Emitir ese token requiere que el job declare `permissions: { id-token: write }` explícitamente; sin esa declaración, `aws-actions/configure-aws-credentials` no tiene ningún JWT que mandarle a `sts:AssumeRoleWithWebIdentity`, así que AWS rechaza la llamada — el error engaña un poco porque suena a un problema del lado de AWS (rol/policy mal configurados), pero el permiso que falta es del lado de GitHub Actions.
+
+**Fix — no fue "agregar el permiso que faltaba" a secas, fue corregir DÓNDE vivía:** el archivo original de la Sesión 8 ya tenía `permissions: { id-token: write, contents: read }` declarado, pero a **nivel de workflow completo** (además de, redundantemente, también a nivel del job `build-and-push`). Funcionalmente los dos niveles conceden el mismo permiso al job que lo necesita, pero el bloque de nivel workflow tiene un problema real de diseño, no solo de estilo: se lo estaba otorgando también al job `test`, que no llama a ninguna acción de AWS y no tiene ningún motivo para poder pedir un token OIDC — un over-grant silencioso, mismo tipo de descuido que el proyecto evita a propósito en todos lados (ver, por ejemplo, las policies IAM de `aws-setup.sh`/`apprunner-roles-setup.sh`, que apuntan a ARNs específicos de Secrets Manager en vez de a `*`). Se corrigió reduciendo el bloque de nivel workflow a solo `contents: read`, y dejando `id-token: write` declarado **únicamente** en el job `build-and-push` — el único de los dos jobs que efectivamente usa `aws-actions/configure-aws-credentials`. El resto del job (`checkout`, login a ECR, build/push de la imagen) no se tocó — fix de una sola cosa, no una reescritura.
+
+**Verificado:** YAML re-parseado (`ruby -ryaml`) confirmando la estructura resultante — `permissions` de nivel workflow con solo `contents: read`; el job `test` sin ningún bloque de `permissions` propio (hereda el de arriba); el job `build-and-push` con `{ id-token: write, contents: read }` explícito. El resto del archivo (`services: postgres`, el gate de `test:cov`, los tags de ECR) permanece exactamente igual a como quedó documentado en la Sesión 8.
+
 ## Próximo paso
 
 Push a `main` → verificar que `.github/workflows/deploy.yml` corre y sube la imagen a ECR (con los 3 secretos de GitHub ya configurados, ver README.md) → migrar el schema contra la RDS real (`prisma migrate deploy`, paso 2 del checklist) → correr manualmente el `aws apprunner create-service` documentado en el README (una sola vez) → validar `GET /health` contra la URL pública de App Runner.
