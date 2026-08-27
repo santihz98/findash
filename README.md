@@ -227,7 +227,7 @@ Ya ejecutado en producción (Sesión 9): las 3 migraciones (`domain_model`, `add
 
 A diferencia de App Runner (que este checklist documentaba hasta la Sesión 8), no hay un único comando `create-service` de una sola vez: [ecs-setup.sh](./ecs-setup.sh) crea el cluster, la task definition y el servicio juntos (ver el detalle de cada recurso en la tabla de arriba). Ya corrió contra la cuenta real.
 
-**Diferencia importante respecto a App Runner — el redeploy no es automático:** App Runner, con `AutoDeploymentsEnabled=true`, vigilaba el tag `latest` de ECR y redesplegaba solo. ECS Fargate no tiene ese comportamiento — un push a `main` que actualiza `latest` en ECR **no** dispara un redeploy de la tarea por sí solo. Esto queda pendiente como el próximo paso del proyecto (Sesión 9.5, ver PROGRESS.md): agregar un step al workflow que corra `aws ecs update-service --cluster findash-cluster --service findash-backend-service --force-new-deployment` después del push a ECR. Hasta que ese step exista, un redeploy tras un cambio de código requiere correr ese comando a mano.
+**Diferencia importante respecto a App Runner — el redeploy no es automático:** App Runner, con `AutoDeploymentsEnabled=true`, vigilaba el tag `latest` de ECR y redesplegaba solo. ECS Fargate no tiene ese comportamiento — un push a `main` que actualiza `latest` en ECR **no** dispara un redeploy de la tarea por sí solo. Desde la Sesión 9.5, `.github/workflows/deploy.yml` (job `build-and-push`) ya tiene los dos steps que lo resuelven: `aws ecs update-service --cluster findash-cluster --service findash-backend-service --force-new-deployment`, seguido de `aws ecs wait services-stable` para que el job falle si la imagen nueva no levanta. **Pendiente (manual, no aplicado todavía):** el rol `findash-github-actions-deploy` no tiene permiso de ECS hoy (solo ECR y App Runner, ver `aws-setup.sh`) — sin el fix de IAM documentado en PROGRESS.md Sesión 9.5, estos dos steps van a fallar con `AccessDenied` en el próximo push. Hasta que se aplique ese permiso, un redeploy tras un cambio de código sigue requiriendo correr el comando `update-service` a mano.
 
 Obtené la IP pública actual de la tarea (puede cambiar si ECS la reemplaza — ver el trade-off documentado en `ecs-setup.sh` sobre no usar Load Balancer):
 
@@ -254,7 +254,9 @@ curl http://<IP_PUBLICA>:3000/health
 - [x] Push a `main` → workflow corre y sube la imagen a ECR (verificado con `aws ecr describe-images`).
 - [x] Servicio ECS alcanzó steady state (`runningCount: 1`, sin tareas caídas).
 - [x] `/health` verificado con `curl` real contra la IP pública de la tarea.
-- [ ] Step de `aws ecs update-service --force-new-deployment` agregado al workflow (Sesión 9.5, próximo paso — ver PROGRESS.md).
+- [x] Step de `aws ecs update-service --force-new-deployment` + `aws ecs wait services-stable` agregado al workflow (Sesión 9.5).
+- [ ] Permiso IAM `ecs:UpdateService`/`ecs:DescribeServices` aplicado al rol `findash-github-actions-deploy` (comando documentado en PROGRESS.md Sesión 9.5, pendiente de correr) — sin esto, el workflow va a fallar en los dos steps nuevos.
+- [ ] Push a `main` verificado end-to-end: la tarea de ECS efectivamente se reemplaza con la imagen nueva (confirmable con `aws ecs describe-tasks`, mirando `startedAt` antes/después del push).
 
 ---
 

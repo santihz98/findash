@@ -287,12 +287,15 @@ GitHub → GitHub Actions (trigger en push a main, .github/workflows/deploy.yml)
    ├── Backend:  install → prisma generate → test contra Postgres efímero
    │             (coverage gate real, test:cov) → Docker build → push a ECR
    │             (tags: SHA del commit + latest)
-   │             → [pendiente, Sesión 9.5] step explícito `aws ecs
-   │               update-service --force-new-deployment` — a diferencia de
-   │               App Runner (que hubiera vigilado `latest` solo, vía
-   │               AutoDeploymentsEnabled), ECS Fargate necesita este
-   │               trigger explícito para que un push a `main` efectivamente
-   │               redespliegue la tarea con la imagen nueva
+   │             → step explícito `aws ecs update-service
+   │               --force-new-deployment` + `aws ecs wait services-stable`
+   │               (Sesión 9.5) — a diferencia de App Runner (que hubiera
+   │               vigilado `latest` solo, vía AutoDeploymentsEnabled), ECS
+   │               Fargate necesita este trigger explícito para que un push
+   │               a `main` efectivamente redespliegue la tarea con la
+   │               imagen nueva. Pendiente: el rol OIDC todavía no tiene el
+   │               permiso IAM de ECS que este step necesita (ver
+   │               PROGRESS.md Sesión 9.5 para el comando exacto)
    ├── Frontend: build (ng build --prod) → deploy a Firebase Hosting (sin cambios de la Sesión 0)
    └── DB:       RDS (Postgres) — igual que con Cloud SQL, las migraciones de
                  Prisma NO corren automáticamente contra la base de

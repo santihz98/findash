@@ -1,4 +1,4 @@
-# Pipeline de CI/CD para el backend de FinDash — AWS (App Runner + ECR + RDS).
+# Pipeline de CI/CD para el backend de FinDash — AWS (ECS Fargate + ECR + RDS).
 #
 # Reemplaza a cloudbuild.yaml (GCP) desde la Sesión 8: la cuenta de
 # facturación de GCP quedó bloqueada por el error OR-CBAT-23 y no se
@@ -9,11 +9,20 @@
 # GitHub Actions): install -> prisma generate -> test contra Postgres
 # efímero (con el gate de cobertura real, `test:cov`) -> build de la
 # imagen Docker -> push a ECR, tageada con el SHA del commit y con
-# `latest`. App Runner (AutoDeploymentsEnabled=true, configurado al crear
-# el servicio — ver README.md) redespliega solo cuando `latest` cambia; no
-# hay un step de "deploy" acá como sí lo había en cloudbuild.yaml (Cloud
-# Run se desplegaba explícitamente desde el pipeline) porque App Runner ya
-# vigila el tag `latest` de ECR por su cuenta.
+# `latest` -> redeploy explícito del servicio ECS Fargate
+# (`aws ecs update-service --force-new-deployment`) -> espera a que la
+# tarea nueva quede estable (`aws ecs wait services-stable`).
+#
+# SÍ hay un step de deploy explícito acá (Sesión 9.5) — a diferencia de
+# cloudbuild.yaml, que también lo tenía (`gcloud run deploy`), la primera
+# versión de este workflow (Sesión 8, cómputo en App Runner) no lo
+# necesitaba: App Runner, con AutoDeploymentsEnabled=true, vigilaba el tag
+# `latest` de ECR por su cuenta y redesplegaba solo con cada push. Tras el
+# pivot de App Runner a ECS Fargate (Sesión 9, ver PROGRESS.md), eso dejó
+# de ser cierto: ECS Fargate sigue corriendo la tarea con la que se creó
+# sin importar cuántas veces este pipeline suba una imagen nueva a ECR,
+# hasta que algo le ordene explícitamente reemplazarla — de ahí los dos
+# steps nuevos al final de `build-and-push`.
 #
 # Autenticación a AWS vía OIDC (aws-actions/configure-aws-credentials) —
 # nunca access keys de larga duración guardadas como secreto de GitHub.
@@ -22,6 +31,14 @@
 #   AWS_DEPLOY_ROLE_ARN  arn:aws:iam::683342010199:role/findash-github-actions-deploy
 #   AWS_REGION            us-east-2
 #   ECR_REPOSITORY        findash-backend
+#
+# El rol findash-github-actions-deploy necesita permiso de ECS
+# (ecs:UpdateService + ecs:DescribeServices sobre el ARN del servicio,
+# esta última porque `aws ecs wait services-stable` hace polling de
+# DescribeServices) para que los dos steps nuevos de redeploy funcionen.
+# Pendiente de aplicar manualmente — ver PROGRESS.md Sesión 9.5 para el
+# comando exacto (mismo patrón que el resto de la infraestructura de este
+# proyecto: se documenta el comando, no se corre desde acá).
 
 name: Deploy
 
@@ -124,9 +141,10 @@ jobs:
 
       # Dos tags por la misma imagen: el SHA del commit (para poder
       # rastrear exactamente qué commit está desplegado en un momento
-      # dado — trazabilidad, no solo despliegue) y `latest` (el que App
-      # Runner vigila con AutoDeploymentsEnabled=true, configurado una
-      # sola vez al crear el servicio — ver README.md).
+      # dado — trazabilidad, no solo despliegue) y `latest`. A diferencia
+      # de App Runner (Sesión 8, ya no en uso), ECS Fargate no vigila este
+      # tag por su cuenta — subir `latest` acá no alcanza para que el
+      # servicio se entere; de ahí los dos steps siguientes.
       - name: Build y push de la imagen
         env:
           ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
@@ -139,3 +157,31 @@ jobs:
             .
           docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
           docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+
+      # Redespliega el servicio ECS con la imagen recién subida. ECS
+      # Fargate sigue corriendo la tarea con la que se creó (o con la del
+      # último redeploy) sin importar cuántas veces se suba una imagen
+      # nueva a ECR — este step es el que le dice explícitamente "hay una
+      # imagen nueva, reemplazá la tarea actual". Reutiliza las
+      # credenciales OIDC ya configuradas arriba en este mismo job, no
+      # hace falta autenticarse de nuevo.
+      - name: Redesplegar el servicio ECS (force-new-deployment)
+        run: |
+          aws ecs update-service \
+            --cluster findash-cluster \
+            --service findash-backend-service \
+            --force-new-deployment \
+            --region ${{ secrets.AWS_REGION }}
+
+      # Bloquea el job hasta que la tarea nueva esté RUNNING y en steady
+      # state, o hasta timeout. Si la imagen nueva no levanta (crashea al
+      # arrancar, falla el health check, etc.), este step falla y el
+      # workflow completo se reporta como fallido — en vez de terminar en
+      # verde con el redeploy "disparado" pero el servicio roto en
+      # producción.
+      - name: Esperar a que el servicio quede estable
+        run: |
+          aws ecs wait services-stable \
+            --cluster findash-cluster \
+            --service findash-backend-service \
+            --region ${{ secrets.AWS_REGION }}

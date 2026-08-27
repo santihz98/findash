@@ -432,6 +432,54 @@ Se pivotó a **ECS Fargate** — reutiliza exactamente el mismo ECR, la misma RD
 
 **Documentación actualizada en esta sesión:** README.md (sección "Checklist de AWS" reescrita para ECS Fargate — recursos reales, comando de verificación de IP pública, nota explícita sobre por qué se abandonó App Runner con la fecha de corte) y ARCHITECTURE.md sección 7 (mismo criterio ya usado para conservar el anexo de GCP: la sección de App Runner no se borra, se marca como "intentado, bloqueado por restricción de producto de AWS", con un anexo nuevo dedicado a esto).
 
+### Sesión 9.5 — Redeploy explícito en el workflow de ECS Fargate ✅ (código), ⏳ (permiso IAM, manual) (2026-08-27)
+
+Cerraba el "Próximo paso" que dejó la Sesión 9: `.github/workflows/deploy.yml` ya suma el trigger explícito que ECS Fargate necesita — a diferencia de App Runner (`AutoDeploymentsEnabled=true`, vigilaba `latest` solo), ECS Fargate sigue corriendo la tarea con la que se creó sin importar cuántas veces el pipeline suba una imagen nueva a ECR, hasta que algo se lo pida.
+
+**Qué cambió en `.github/workflows/deploy.yml` (job `build-and-push`, mismo job — no uno nuevo, reutiliza las credenciales OIDC ya configuradas):**
+
+- Step nuevo **"Redesplegar el servicio ECS (force-new-deployment)"**, inmediatamente después de "Build y push de la imagen": `aws ecs update-service --cluster findash-cluster --service findash-backend-service --force-new-deployment --region ${{ secrets.AWS_REGION }}`.
+- Step nuevo **"Esperar a que el servicio quede estable"**: `aws ecs wait services-stable --cluster findash-cluster --service findash-backend-service --region ${{ secrets.AWS_REGION }}` — si la imagen nueva no levanta (crashea al arrancar, falla `/health`, etc.), este step hace timeout/falla y el job completo se reporta como fallido, en vez de terminar en verde con un `force-new-deployment` "disparado" pero el servicio roto en producción.
+- Comentario del header reescrito: ya no dice "no hay un step de deploy acá... porque App Runner ya vigila el tag `latest`" (eso dejó de ser cierto en cuanto el pivot de la Sesión 9 reemplazó App Runner por ECS Fargate) — ahora documenta el step explícito, por qué hace falta, y el permiso de IAM pendiente (ver abajo). El comentario del step "Build y push de la imagen" también se corrigió (ya no dice "el tag que App Runner vigila").
+- README.md ("Checklist de AWS") y ARCHITECTURE.md (sección 7, diagrama de pipeline) actualizados para que ningún lugar del repo siga describiendo el step de redeploy como pendiente sin más — ahora reflejan que el step ya existe en el workflow, con el permiso de IAM marcado explícitamente como el bloqueo real que queda.
+- YAML re-validado (`ruby -ryaml`) tras los cambios — sigue siendo válido.
+
+**Permiso de IAM faltante — identificado, NO aplicado (paso manual pendiente del usuario, mismo patrón que el resto de la infraestructura de este proyecto: se documenta el comando, no se corre desde una sesión de Claude Code):**
+
+El rol `findash-github-actions-deploy` (el que usa el job `build-and-push`) hoy solo tiene `AmazonEC2ContainerRegistryPowerUser` y `AWSAppRunnerFullAccess` (ver `aws-setup.sh`, Sesión 8) — ningún permiso de ECS. Sin el fix de abajo, los dos steps nuevos van a fallar con `AccessDenied` en el próximo push a `main`.
+
+**Se eligió policy inline acotada al ARN del servicio (opción "b" del enunciado), no `AmazonECS_FullAccess` — mismo criterio de mínimo privilegio que ya rige en el resto del proyecto** (ver, por ejemplo, cómo la execution role de `ecs-setup.sh` acota `secretsmanager:GetSecretValue` a los 3 ARNs reales de Secrets Manager en vez de `*`). El job `build-and-push` solo necesita disparar y esperar el redeploy de un servicio específico, nunca administrar clusters/task definitions/otros servicios — `AmazonECS_FullAccess` habría sido un over-grant del mismo tipo que ya se corrigió una vez en este proyecto (ver el bug de `permissions: id-token: write` a nivel de workflow completo, Sesión 8/post-Sesión 8).
+
+Comando a correr manualmente (cuenta `683342010199`, región `us-east-2`, mismos valores que el resto de la infraestructura de AWS documentada en README.md):
+
+```bash
+cat > /tmp/findash-github-actions-ecs-deploy-policy.json << 'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": [
+      "ecs:UpdateService",
+      "ecs:DescribeServices"
+    ],
+    "Resource": "arn:aws:ecs:us-east-2:683342010199:service/findash-cluster/findash-backend-service"
+  }]
+}
+EOF
+
+aws iam put-role-policy \
+  --role-name findash-github-actions-deploy \
+  --policy-name findash-ecs-deploy \
+  --policy-document file:///tmp/findash-github-actions-ecs-deploy-policy.json \
+  --region us-east-2
+```
+
+(`ecs:DescribeServices` sobre el mismo ARN porque `aws ecs wait services-stable` funciona haciendo polling de `DescribeServices` — sin este segundo permiso, el step de espera fallaría aunque el redeploy en sí ya hubiera funcionado.)
+
+**No verificado en esta sesión:** ni el comando de arriba ni un push real a `main` se ejecutaron — esta sesión se mantuvo dentro de "preparar el workflow y documentar el permiso faltante", mismo alcance consciente que ya se declaró en la Sesión 8 para la infraestructura de AWS.
+
 ## Próximo paso
 
-**Sesión 9.5** (ya definida): agregar un step nuevo al workflow de GitHub Actions que ejecute `aws ecs update-service --cluster findash-cluster --service findash-backend-service --force-new-deployment` después del push a ECR — a diferencia de App Runner (que vigilaba el tag `latest` automáticamente vía `AutoDeploymentsEnabled`), ECS Fargate necesita este trigger explícito para que cada push a `main` efectivamente redespliegue la tarea con la imagen nueva. Hasta que ese step exista, un redeploy tras un cambio de código en producción requiere correr `aws ecs update-service --force-new-deployment` a mano.
+1. Aplicar el permiso de IAM documentado arriba (`aws iam put-role-policy` contra `findash-github-actions-deploy`) — sin esto, el próximo push a `main` va a llegar hasta el step "Redesplegar el servicio ECS" y fallar con `AccessDenied`.
+2. Hacer push a `main` (puede ser este mismo cambio) y confirmar que el workflow corre de punta a punta, incluidos los dos steps nuevos, en verde.
+3. Confirmar que el redeploy fue real, no solo que el step "tuvo éxito": comparar `startedAt` de la tarea de ECS antes y después del push — `aws ecs describe-tasks --cluster findash-cluster --tasks $(aws ecs list-tasks --cluster findash-cluster --service-name findash-backend-service --region us-east-2 --query 'taskArns[0]' --output text) --region us-east-2 --query 'tasks[0].startedAt'`. Un `startedAt` posterior al push confirma que ECS efectivamente reemplazó la tarea con la imagen nueva, no que simplemente reportó éxito sin cambiar nada.
