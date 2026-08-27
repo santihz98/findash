@@ -33,7 +33,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # CONFIGURACIÓN — ajusta esto antes de correr el script
 # ---------------------------------------------------------------------------
-AWS_REGION="us-east-1"
+AWS_REGION="us-east-2"
 ECR_REPO_NAME="findash-backend"
 RDS_INSTANCE_ID="findash-db"
 RDS_DB_NAME="findash"
