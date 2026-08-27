@@ -4,10 +4,13 @@ Monorepo del proyecto FinDash. Ver [ARCHITECTURE.md](./ARCHITECTURE.md) para el 
 
 ```
 .
-├── backend/          # NestJS + Prisma (arquitectura hexagonal)
-├── frontend/          # Angular (vacío, se inicializa en una sesión futura)
-├── docker-compose.yml # Postgres + backend para desarrollo local
-└── cloudbuild.yaml    # CI/CD: test → build → push → deploy (Cloud Run)
+├── backend/                       # NestJS + Prisma (arquitectura hexagonal)
+├── frontend/                      # Angular (vacío, se inicializa en una sesión futura)
+├── docker-compose.yml             # Postgres + backend para desarrollo local
+├── .github/workflows/deploy.yml   # CI/CD activo: test → build → push a ECR (AWS App Runner)
+├── aws-setup.sh                   # Setup inicial de AWS (ECR, RDS, Secrets Manager, rol OIDC) — ya corrido
+├── apprunner-roles-setup.sh       # Roles de App Runner (Access/Instance) — ya corrido
+└── infra/gcp/cloudbuild.yaml.bak  # Pipeline original de GCP — no usado (ver Sesión 8, PROGRESS.md)
 ```
 
 ---
@@ -161,148 +164,123 @@ curl -s -w "\n%{http_code}\n" -X POST http://localhost:3000/transactions/transfe
 
 ---
 
-## Checklist de GCP (pasos manuales, una sola vez)
+## Checklist de AWS (pasos manuales, mayormente ya ejecutados)
 
-Estos pasos **no los ejecuta Claude Code** — son cambios en tu cuenta/proyecto de GCP y requieren tu autorización explícita. Ejecútalos en orden antes de la Sesión 9 (primer despliegue real a producción). Necesitas `gcloud` CLI autenticado (`gcloud auth login`) y un método de facturación habilitado en el proyecto.
+**Pivot de GCP a AWS (Sesión 8):** la cuenta de facturación de GCP quedó bloqueada por el error `OR-CBAT-23`, sin resolución posible desde este lado — ver PROGRESS.md Sesión 8 para el detalle completo. El checklist de GCP original (Cloud Run + Cloud SQL + Artifact Registry + Cloud Build) queda documentado como anexo en [ARCHITECTURE.md sección 7](./ARCHITECTURE.md) y su pipeline en [infra/gcp/cloudbuild.yaml.bak](./infra/gcp/cloudbuild.yaml.bak), sin borrar — es evidencia real de trabajo hecho y de una decisión de arquitectura tomada bajo una restricción externa, no técnica.
 
-### 1. Crear el proyecto de GCP
+A diferencia del checklist de GCP (que nunca se ejecutó), **este ya corrió** — [aws-setup.sh](./aws-setup.sh) y [apprunner-roles-setup.sh](./apprunner-roles-setup.sh) (raíz del repo) se ejecutaron manualmente contra la cuenta de AWS real. Los recursos de abajo ya existen; lo que queda pendiente es correr `aws apprunner create-service` **una sola vez**, después del primer push exitoso a ECR vía el workflow de GitHub Actions ([.github/workflows/deploy.yml](./.github/workflows/deploy.yml)).
 
-```bash
-gcloud projects create findash-prod --name="FinDash"
-gcloud config set project findash-prod
-# Vincula el proyecto a una cuenta de facturación desde la consola:
-# https://console.cloud.google.com/billing/linkedaccount?project=findash-prod
+### Recursos ya aprovisionados
+
+| Recurso | Valor |
+|---|---|
+| Región AWS | `us-east-2` |
+| Cuenta AWS | `683342010199` |
+| ECR | `683342010199.dkr.ecr.us-east-2.amazonaws.com/findash-backend` |
+| RDS endpoint | `findash-db.c3iyyk8209g1.us-east-2.rds.amazonaws.com` |
+| Rol GitHub Actions (OIDC) | `arn:aws:iam::683342010199:role/findash-github-actions-deploy` |
+| App Runner Access Role | `arn:aws:iam::683342010199:role/findash-apprunner-ecr-access` |
+| App Runner Instance Role | `arn:aws:iam::683342010199:role/findash-apprunner-instance` |
+| Secret `DATABASE_URL` | `arn:aws:secretsmanager:us-east-2:683342010199:secret:findash/DATABASE_URL-VA15k5` |
+| Secret `JWT_SECRET` | `arn:aws:secretsmanager:us-east-2:683342010199:secret:findash/JWT_SECRET-CQMrZG` |
+| Secret `JWT_REFRESH_SECRET` | `arn:aws:secretsmanager:us-east-2:683342010199:secret:findash/JWT_REFRESH_SECRET-YuNBle` |
+
+- `aws-setup.sh` creó: el repositorio ECR, la instancia RDS Postgres (free tier, públicamente accesible — trade-off deliberado documentado dentro del propio script, ver la sección "Qué NO hace"), los 3 secretos en Secrets Manager, y el rol IAM + proveedor OIDC para que GitHub Actions se autentique sin access keys de larga duración.
+- `apprunner-roles-setup.sh` creó los dos roles que `aws-setup.sh` no cubre: el Access Role (para que App Runner pueda hacer `pull` de ECR) y el Instance Role (para que el contenedor, ya corriendo, pueda leer los 3 secretos de Secrets Manager en runtime — sin esto el backend falla al arrancar por diseño, ver `TokenService`, Sesión 2).
+
+### 1. Configurar los 3 secretos del repositorio en GitHub
+
+Settings > Secrets and variables > Actions > New repository secret:
+
+```
+AWS_DEPLOY_ROLE_ARN = arn:aws:iam::683342010199:role/findash-github-actions-deploy
+AWS_REGION           = us-east-2
+ECR_REPOSITORY       = findash-backend
 ```
 
-### 2. Habilitar las APIs necesarias
+El workflow ([.github/workflows/deploy.yml](./.github/workflows/deploy.yml)) los usa para autenticarse vía OIDC (`aws-actions/configure-aws-credentials`, sin ningún access key guardado como secreto) y para saber a qué repositorio de ECR pushear.
+
+### 2. Migrar el schema contra la RDS real (una sola vez, y de nuevo cada vez que `schema.prisma` cambie)
+
+Ni el workflow de GitHub Actions ni (antes) `cloudbuild.yaml` corren `prisma migrate deploy` contra la base de datos de **producción** — ambos pipelines solo migran el Postgres efímero que usan para los tests. Esto es intencional (no hay ninguna razón de negocio para correr una migración de schema en cada push si el schema no cambió), pero significa que hay que hacerlo a mano cuando sí cambia. Como RDS es públicamente accesible (ver trade-off documentado en `aws-setup.sh`), se puede correr desde cualquier máquina con `npm`/`npx` y la contraseña real (la misma que generó `aws-setup.sh` y guardó en el secreto `DATABASE_URL`):
 
 ```bash
-gcloud services enable \
-  run.googleapis.com \
-  sqladmin.googleapis.com \
-  artifactregistry.googleapis.com \
-  cloudbuild.googleapis.com \
-  secretmanager.googleapis.com
+cd backend
+DATABASE_URL="postgresql://findash_app:LA_PASSWORD_REAL@findash-db.c3iyyk8209g1.us-east-2.rds.amazonaws.com:5432/findash?sslmode=require" \
+  npx prisma migrate deploy
 ```
 
-### 3. Crear el repositorio de Artifact Registry
+> Recupera la password real (no quedó en ningún archivo del repo, `aws-setup.sh` la generó al vuelo con `openssl rand`) desde el secreto `DATABASE_URL` en Secrets Manager: `aws secretsmanager get-secret-value --secret-id findash/DATABASE_URL --region us-east-2 --query SecretString --output text`.
+
+### 3. Crear el servicio de App Runner (una sola vez, después del primer push a ECR)
+
+Necesita que ya exista al menos una imagen en ECR con el tag `latest` — es decir, corre esto **después** de que el workflow de GitHub Actions haya corrido al menos una vez con éxito (push a `main`).
 
 ```bash
-gcloud artifacts repositories create findash \
-  --repository-format=docker \
-  --location=us-central1 \
-  --description="Imágenes del backend de FinDash"
+aws apprunner create-service \
+  --region us-east-2 \
+  --service-name findash-backend \
+  --source-configuration '{
+    "ImageRepository": {
+      "ImageIdentifier": "683342010199.dkr.ecr.us-east-2.amazonaws.com/findash-backend:latest",
+      "ImageRepositoryType": "ECR",
+      "ImageConfiguration": {
+        "Port": "3000",
+        "RuntimeEnvironmentVariables": {
+          "NODE_ENV": "production",
+          "JWT_ACCESS_EXPIRES_IN": "15m",
+          "JWT_REFRESH_EXPIRES_IN": "7d"
+        },
+        "RuntimeEnvironmentSecrets": {
+          "DATABASE_URL": "arn:aws:secretsmanager:us-east-2:683342010199:secret:findash/DATABASE_URL-VA15k5",
+          "JWT_SECRET": "arn:aws:secretsmanager:us-east-2:683342010199:secret:findash/JWT_SECRET-CQMrZG",
+          "JWT_REFRESH_SECRET": "arn:aws:secretsmanager:us-east-2:683342010199:secret:findash/JWT_REFRESH_SECRET-YuNBle"
+        }
+      }
+    },
+    "AutoDeploymentsEnabled": true,
+    "AuthenticationConfiguration": {
+      "AccessRoleArn": "arn:aws:iam::683342010199:role/findash-apprunner-ecr-access"
+    }
+  }' \
+  --instance-configuration '{
+    "InstanceRoleArn": "arn:aws:iam::683342010199:role/findash-apprunner-instance"
+  }' \
+  --health-check-configuration '{
+    "Protocol": "HTTP",
+    "Path": "/health"
+  }'
 ```
 
-> Si cambias la región o el nombre del repo, actualiza las substitutions `_REGION` / `_AR_REPO` en [cloudbuild.yaml](./cloudbuild.yaml) o en el trigger.
+`AutoDeploymentsEnabled: true` es lo que hace que este comando se corra **una única vez**: de ahí en adelante, cualquier push a `main` que actualice el tag `latest` en ECR (vía el workflow) dispara un redeploy automático de App Runner, sin volver a tocar `create-service`. El health check usa `GET /health` (el mismo endpoint que ya usa `docker-compose.yml` en local, ver `backend/src/modules/health/`) en vez del check TCP genérico por defecto — así App Runner detecta un contenedor "arriba pero todavía sin conexión a la base" como no-saludable, no solo "el puerto responde".
 
-### 4. Crear la instancia de Cloud SQL (Postgres)
+Después de crear el servicio, obtené la URL pública:
 
 ```bash
-gcloud sql instances create findash-db \
-  --database-version=POSTGRES_16 \
-  --tier=db-f1-micro \
-  --region=us-central1 \
-  --storage-size=10GB \
-  --storage-auto-increase
-
-# Crea la base de datos y el usuario de la app
-gcloud sql databases create findash --instance=findash-db
-gcloud sql users create findash_app \
-  --instance=findash-db \
-  --password="ELIGE_UNA_PASSWORD_SEGURA_AQUI"
+aws apprunner describe-service --region us-east-2 \
+  --service-arn "$(aws apprunner list-services --region us-east-2 --query 'ServiceSummaryList[?ServiceName==`findash-backend`].ServiceArn' --output text)" \
+  --query 'Service.ServiceUrl' --output text
 ```
-
-Anota el `CONNECTION_NAME` de la instancia (formato `PROJECT_ID:REGION:INSTANCE_NAME`), lo necesitas en el paso 5 y en el deploy de Cloud Run:
-
-```bash
-gcloud sql instances describe findash-db --format="value(connectionName)"
-```
-
-### 5. Configurar Secret Manager con `DATABASE_URL`, `JWT_SECRET` y `JWT_REFRESH_SECRET`
-
-Cloud Run se conecta a Cloud SQL vía **Unix socket** (Cloud SQL Auth Proxy integrado), no vía TCP/host — por eso el formato de la URL es distinto al de desarrollo local:
-
-```bash
-CONNECTION_NAME="findash-prod:us-central1:findash-db"   # el que anotaste en el paso 4
-
-printf 'postgresql://findash_app:ELIGE_UNA_PASSWORD_SEGURA_AQUI@localhost/findash?host=/cloudsql/%s' "$CONNECTION_NAME" \
-  | gcloud secrets create DATABASE_URL --data-file=-
-
-# JWT_SECRET / JWT_REFRESH_SECRET (Sesión 2): dos secretos DISTINTOS, cada
-# uno con `openssl rand -hex 32` — nunca reutilices los valores de ejemplo
-# de backend/.env.example en producción.
-openssl rand -hex 32 | gcloud secrets create JWT_SECRET --data-file=-
-openssl rand -hex 32 | gcloud secrets create JWT_REFRESH_SECRET --data-file=-
-
-# Dale acceso de lectura a los 3 secretos a la service account que usará
-# Cloud Run (por defecto, la service account por compute del proyecto):
-PROJECT_NUMBER=$(gcloud projects describe findash-prod --format="value(projectNumber)")
-for SECRET in DATABASE_URL JWT_SECRET JWT_REFRESH_SECRET; do
-  gcloud secrets add-iam-policy-binding "$SECRET" \
-    --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
-    --role="roles/secretmanager.secretAccessor"
-done
-```
-
-> `cloudbuild.yaml` ya inyecta los 3 secretos en el deploy vía `--set-secrets`. Nunca pongas sus valores reales en el repo (ni en `.env`, ni en `cloudbuild.yaml`) — solo viven en Secret Manager. El backend falla al arrancar si `JWT_SECRET`/`JWT_REFRESH_SECRET` faltan (sin fallback hardcodeado, ver `TokenService`), así que si el deploy falla al iniciar el contenedor, revisa primero que estos dos secretos existan y tengan el binding de IAM correcto.
-
-### 6. Dar permisos a la service account de Cloud Build
-
-La service account que ejecuta los triggers necesita poder desplegar en Cloud Run, publicar en Artifact Registry, y actuar como usuario de la service account de Cloud Run:
-
-```bash
-PROJECT_NUMBER=$(gcloud projects describe findash-prod --format="value(projectNumber)")
-CB_SA="${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com"
-
-gcloud projects add-iam-policy-binding findash-prod \
-  --member="serviceAccount:${CB_SA}" --role="roles/run.admin"
-gcloud projects add-iam-policy-binding findash-prod \
-  --member="serviceAccount:${CB_SA}" --role="roles/artifactregistry.writer"
-gcloud projects add-iam-policy-binding findash-prod \
-  --member="serviceAccount:${CB_SA}" --role="roles/iam.serviceAccountUser"
-gcloud projects add-iam-policy-binding findash-prod \
-  --member="serviceAccount:${CB_SA}" --role="roles/cloudsql.client"
-```
-
-### 7. Crear el trigger de Cloud Build conectado a GitHub
-
-1. Sube este repositorio a GitHub si aún no está ahí.
-2. Conecta el repositorio desde la consola: [console.cloud.google.com/cloud-build/triggers/connect](https://console.cloud.google.com/cloud-build/triggers/connect?project=findash-prod)
-3. Crea el trigger:
-
-```bash
-gcloud builds triggers create github \
-  --name="findash-backend-deploy" \
-  --repo-name="TU_REPO_EN_GITHUB" \
-  --repo-owner="TU_USUARIO_O_ORG" \
-  --branch-pattern="^main$" \
-  --build-config="cloudbuild.yaml"
-```
-
-4. Verifica/ajusta las substitutions del trigger si tu región, nombre de repo de Artifact Registry, instancia de Cloud SQL o nombre del secreto son distintos a los valores por defecto de `cloudbuild.yaml` (`_REGION`, `_AR_REPO`, `_SERVICE_NAME`, `_CLOUDSQL_INSTANCE`, `_DATABASE_URL_SECRET`).
 
 ### Checklist resumido
 
-- [ ] Proyecto de GCP creado y con facturación habilitada
-- [ ] APIs habilitadas (Cloud Run, Cloud SQL Admin, Artifact Registry, Cloud Build, Secret Manager)
-- [ ] Repositorio de Artifact Registry creado
-- [ ] Instancia de Cloud SQL (Postgres) creada, con base de datos y usuario de app
-- [ ] Secretos `DATABASE_URL`, `JWT_SECRET` y `JWT_REFRESH_SECRET` creados en Secret Manager, con acceso para la service account de Cloud Run
-- [ ] Permisos IAM otorgados a la service account de Cloud Build
-- [ ] Repo conectado a GitHub y trigger de Cloud Build creado
+- [x] `aws-setup.sh` corrido — ECR, RDS, Secrets Manager, rol OIDC de GitHub Actions.
+- [x] `apprunner-roles-setup.sh` corrido — Access Role e Instance Role de App Runner.
+- [ ] 3 secretos configurados en GitHub (Settings > Secrets and variables > Actions).
+- [ ] Schema migrado contra la RDS real (`prisma migrate deploy`, paso 2 de arriba).
+- [ ] Push a `main` → workflow corre y sube la imagen a ECR.
+- [ ] `aws apprunner create-service` corrido (paso 3 de arriba, una sola vez).
+- [ ] `/health` verificado contra la URL pública de App Runner.
 
 ---
 
-## Conexión Cloud Run ↔ Cloud SQL
+## Conexión App Runner ↔ RDS
 
-Cloud Run no se conecta a Cloud SQL por IP/TCP como en local — usa el **Cloud SQL Auth Proxy integrado** vía un socket Unix montado automáticamente cuando el servicio se despliega con `--add-cloudsql-instances`. `cloudbuild.yaml` ya incluye este flag en el paso `deploy`.
-
-La diferencia clave está en el formato de `DATABASE_URL`:
+Mucho más simple que el equivalente en GCP (Cloud Run necesitaba el Cloud SQL Auth Proxy vía socket Unix, ver el anexo de GCP en ARCHITECTURE.md): como la instancia de RDS se creó públicamente accesible (trade-off deliberado de `aws-setup.sh`, ver el comentario en ese script), App Runner se conecta por **TCP normal con TLS**, exactamente el mismo tipo de conexión que Prisma ya usa en local — solo cambia el host y `sslmode`.
 
 | Entorno | Formato de `DATABASE_URL` |
 |---|---|
-| Local (docker-compose) | `postgresql://user:pass@postgres:5432/findash?schema=public` (TCP, host = nombre del servicio) |
-| Cloud Run + Cloud SQL | `postgresql://user:pass@localhost/findash?host=/cloudsql/PROJECT:REGION:INSTANCE` (Unix socket) |
+| Local (docker-compose) | `postgresql://user:pass@postgres:5432/findash?schema=public` (TCP, host = nombre del servicio, sin TLS) |
+| App Runner + RDS | `postgresql://user:pass@findash-db.c3iyyk8209g1.us-east-2.rds.amazonaws.com:5432/findash?sslmode=require` (TCP, con TLS) |
 
-La variable de entorno que Cloud Run necesita es simplemente `DATABASE_URL` (inyectada desde Secret Manager, ver paso 5 del checklist) con ese segundo formato — Prisma la lee vía `env("DATABASE_URL")` en [backend/prisma/schema.prisma](./backend/prisma/schema.prisma), sin ningún cambio de código entre entornos.
+`DATABASE_URL` llega a App Runner inyectada desde Secrets Manager vía `RuntimeEnvironmentSecrets` en el comando `create-service` de arriba — Prisma la lee vía `env("DATABASE_URL")` en [backend/prisma/schema.prisma](./backend/prisma/schema.prisma), exactamente igual que en local y que en el diseño original de GCP: sin ningún cambio de código entre entornos, solo cambia el valor de la variable.

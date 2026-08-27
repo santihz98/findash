@@ -1,3 +1,23 @@
+# ============================================================================
+# ARCHIVO NO USADO ACTUALMENTE — versión original del pipeline para GCP.
+# ============================================================================
+# Este es el pipeline de Cloud Build que se diseñó y validó (como YAML bien
+# formado, con los steps de test/build/push/deploy completos) durante las
+# Sesiones 0-7, pensado para desplegar en Cloud Run + Cloud SQL + Artifact
+# Registry. Nunca llegó a correr contra un proyecto real de GCP: la creación
+# de la cuenta de facturación quedó bloqueada por el error `OR-CBAT-23`
+# (Google Cloud Billing), sin resolución posible desde este lado — ver
+# PROGRESS.md Sesión 8 para el detalle completo del pivot.
+#
+# En la Sesión 8 el proyecto migró a AWS (App Runner + ECR + RDS + GitHub
+# Actions vía OIDC) — ver .github/workflows/deploy.yml (el pipeline activo
+# hoy) y ARCHITECTURE.md sección 7 (que documenta AWS como la nube activa,
+# con este archivo como anexo). Se conserva acá, sin borrar y sin
+# renombrar el contenido interno, como evidencia real de trabajo hecho y
+# de una decisión de arquitectura tomada bajo una restricción externa (no
+# técnica) — vale la pena mostrarlo en la sustentación tal cual quedó.
+# ============================================================================
+#
 # Pipeline de CI/CD para el backend de FinDash.
 #
 # Flujo: test -> build de imagen -> push a Artifact Registry -> deploy a Cloud Run.

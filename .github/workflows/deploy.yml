@@ -1,0 +1,135 @@
+# Pipeline de CI/CD para el backend de FinDash — AWS (App Runner + ECR + RDS).
+#
+# Reemplaza a cloudbuild.yaml (GCP) desde la Sesión 8: la cuenta de
+# facturación de GCP quedó bloqueada por el error OR-CBAT-23 y no se
+# resolvió — ver PROGRESS.md Sesión 8 para el detalle completo del pivot.
+# cloudbuild.yaml se conserva en infra/gcp/cloudbuild.yaml.bak, sin borrar.
+#
+# Flujo (mismos pasos lógicos que cloudbuild.yaml validaba, adaptados a
+# GitHub Actions): install -> prisma generate -> test contra Postgres
+# efímero (con el gate de cobertura real, `test:cov`) -> build de la
+# imagen Docker -> push a ECR, tageada con el SHA del commit y con
+# `latest`. App Runner (AutoDeploymentsEnabled=true, configurado al crear
+# el servicio — ver README.md) redespliega solo cuando `latest` cambia; no
+# hay un step de "deploy" acá como sí lo había en cloudbuild.yaml (Cloud
+# Run se desplegaba explícitamente desde el pipeline) porque App Runner ya
+# vigila el tag `latest` de ECR por su cuenta.
+#
+# Autenticación a AWS vía OIDC (aws-actions/configure-aws-credentials) —
+# nunca access keys de larga duración guardadas como secreto de GitHub.
+# Los 3 secretos que este workflow necesita (Settings > Secrets and
+# variables > Actions):
+#   AWS_DEPLOY_ROLE_ARN  arn:aws:iam::683342010199:role/findash-github-actions-deploy
+#   AWS_REGION            us-east-2
+#   ECR_REPOSITORY        findash-backend
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write # requerido por aws-actions/configure-aws-credentials (OIDC)
+  contents: read
+
+jobs:
+  test:
+    name: Test (Postgres real + cobertura)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    # Postgres efímero para los tests de integración real (Prisma repos,
+    # concurrencia, idempotencia, anti-fraude, dashboard) — mismo motivo
+    # que test-db-up/test-db-wait en cloudbuild.yaml, pero acá GitHub
+    # Actions maneja el healthcheck nativamente vía `options:
+    # --health-cmd`, sin necesidad de replicar el loop manual de
+    # `pg_isready` que cloudbuild.yaml sí necesitaba (ahí no existía un
+    # equivalente nativo a `services:`).
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: findash
+          POSTGRES_PASSWORD: findash_test_password
+          POSTGRES_DB: findash_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U findash -d findash_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://findash:findash_test_password@localhost:5432/findash_test?schema=public
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generar Prisma Client
+        run: npm run prisma:generate
+
+      - name: Migrar el Postgres efímero
+        run: npm run prisma:migrate:deploy
+
+      # Gate de cobertura real (Sesión 8): `test:cov`, no `test` a secas.
+      # PROGRESS.md documenta desde la Sesión 0 que esto quedaba pendiente
+      # "al llegar a la Fase 6 del roadmap" — el backend ya está
+      # funcionalmente completo (RF-01 a RF-08), corresponde activarlo
+      # ahora. El umbral (80% branches/functions/lines/statements,
+      # package.json > jest.coverageThreshold) es GLOBAL, no por archivo;
+      # confirmado localmente en 99%+ antes de activar este gate en CI
+      # (ver PROGRESS.md Sesión 8 para el detalle archivo por archivo de
+      # las pocas ramas defensivas que quedan sin cubrir a propósito).
+      - name: Tests con cobertura (gate real, no solo humo)
+        run: npm run test:cov
+
+  build-and-push:
+    name: Build + push a ECR
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar credenciales de AWS (OIDC, sin access keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login a ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Dos tags por la misma imagen: el SHA del commit (para poder
+      # rastrear exactamente qué commit está desplegado en un momento
+      # dado — trazabilidad, no solo despliegue) y `latest` (el que App
+      # Runner vigila con AutoDeploymentsEnabled=true, configurado una
+      # sola vez al crear el servicio — ver README.md).
+      - name: Build y push de la imagen
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:latest" \
+            .
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"

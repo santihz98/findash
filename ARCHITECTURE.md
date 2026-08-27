@@ -25,7 +25,7 @@ El reto no es "hacer que funcione", es demostrar que el sistema **puede absorber
 | Frontend | Angular (standalone components) | Requisito del documento. |
 | Estado global | **NgRx** | Cumple RNF-03: ningún componente presentacional inyecta `HttpClient`. |
 | Auth | JWT (access + refresh) | RF-01. |
-| Cloud | **GCP**: Cloud Run + Cloud SQL + Secret Manager + Firebase Hosting | Serverless, escala a cero, barato para una demo, CI/CD simple con Cloud Build. |
+| Cloud | **AWS**: App Runner + RDS + Secrets Manager + Firebase Hosting (desde la Sesión 8 — diseño original en GCP, ver sección 7 y su Anexo) | Containerizado, HTTPS/autoescalado gestionados, CI/CD simple con GitHub Actions vía OIDC. |
 | Testing | Jest (backend) + Jasmine/Jest (frontend) | Cobertura > 80% exigida. |
 
 ---
@@ -278,7 +278,39 @@ Configura `jest.config.js` con `coverageThreshold: { global: { branches: 80, fun
 
 ---
 
-## 7. CI/CD y despliegue en GCP
+## 7. CI/CD y despliegue en AWS
+
+**Nube activa desde la Sesión 8.** El diseño original apuntaba a GCP (ver el Anexo al final de esta sección) — la cuenta de facturación de GCP quedó bloqueada por el error `OR-CBAT-23`, sin resolución posible desde este lado, y el proyecto migró a AWS. La arquitectura de aplicación (hexagonal, Docker) es la misma sin ningún cambio de código; lo que cambió es exclusivamente la infraestructura y el pipeline.
+
+```
+GitHub → GitHub Actions (trigger en push a main, .github/workflows/deploy.yml)
+   ├── Backend:  install → prisma generate → test contra Postgres efímero
+   │             (coverage gate real, test:cov) → Docker build → push a ECR
+   │             (tags: SHA del commit + latest)
+   │             → App Runner redespliega solo (AutoDeploymentsEnabled=true,
+   │               vigila el tag `latest` de ECR — no hay un step de "deploy"
+   │               explícito en el workflow, a diferencia del Cloud Run
+   │               original)
+   ├── Frontend: build (ng build --prod) → deploy a Firebase Hosting (sin cambios de la Sesión 0)
+   └── DB:       RDS (Postgres) — igual que con Cloud SQL, las migraciones de
+                 Prisma NO corren automáticamente contra la base de
+                 producción en ningún pipeline (ni el de GCP ni el actual) —
+                 es un paso manual documentado en README.md, sección
+                 "Checklist de AWS".
+```
+
+- **Secrets Manager**: `DATABASE_URL`, `JWT_SECRET`, `JWT_REFRESH_SECRET` — nunca en el repo. Inyectados a App Runner vía `RuntimeEnvironmentSecrets` (equivalente a `--set-secrets` de Cloud Run).
+- **ECR** (Elastic Container Registry): reemplaza a Artifact Registry — mismo rol, registro de imágenes Docker privado.
+- **App Runner**: reemplaza a Cloud Run — backend containerizado, HTTPS + balanceo + autoescalado gestionados. A diferencia de Cloud Run, App Runner no escala a cero (siempre hay al menos una instancia corriendo) — trade-off de costo aceptado explícitamente por simplicidad de setup en el tiempo acotado de este proyecto (ver `aws-setup.sh`).
+- **RDS**: reemplaza a Cloud SQL. Conexión por **TCP/TLS estándar** (`sslmode=require`), no por Cloud SQL Auth Proxy/socket Unix — la instancia se creó públicamente accesible (trade-off deliberado, documentado en `aws-setup.sh`), así que no hace falta un VPC connector ni ningún mecanismo de proxy integrado. Ver README.md, sección "Conexión App Runner ↔ RDS".
+- **Autenticación de GitHub Actions vía OIDC**: `aws-actions/configure-aws-credentials` asume un rol IAM (`findash-github-actions-deploy`) con un proveedor OIDC de confianza hacia `token.actions.githubusercontent.com` — nunca access keys de larga duración guardadas como secreto de GitHub. Mismo principio de seguridad que ya regía para JWT/passwords en el resto del proyecto: nada sensible de larga vida vive en texto plano en un secreto de CI.
+- **Firebase Hosting**: sin cambios respecto al diseño original — sigue sirviendo el build de Angular, no depende de qué nube aloja el backend.
+
+Detalle completo de recursos reales, comandos de setup, y el `aws apprunner create-service` completo: README.md, sección "Checklist de AWS".
+
+### Anexo — despliegue alternativo en GCP (no usado, ver PROGRESS.md Sesión 8)
+
+Diseño original de este proyecto (Sesiones 0-7), documentado acá por completitud y porque el pipeline (`infra/gcp/cloudbuild.yaml.bak`) sí se construyó y se validó como YAML bien formado — solo nunca llegó a correr contra un proyecto real de GCP por el bloqueo de facturación (`OR-CBAT-23`).
 
 ```
 GitHub → Cloud Build (trigger en push a main)
@@ -289,7 +321,7 @@ GitHub → Cloud Build (trigger en push a main)
 ```
 
 - **Secret Manager**: `JWT_SECRET`, `DATABASE_URL` — nunca en el repo.
-- **Cloud Run**: backend containerizado, escala a cero (ideal para demo/evaluación, costo ~$0 en reposo).
+- **Cloud Run**: backend containerizado, escala a cero (ideal para demo/evaluación, costo ~$0 en reposo) — a diferencia de App Runner, esta era una ventaja real de costo que se perdió en el pivot, aceptada conscientemente a cambio de tener *algún* proveedor cloud funcionando.
 - **Cloud SQL**: conexión vía Cloud SQL Auth Proxy o Unix socket desde Cloud Run.
 - **Firebase Hosting**: sirve el build de Angular con CDN global, gratis en el tier de evaluación.
 
@@ -304,7 +336,7 @@ GitHub → Cloud Build (trigger en push a main)
 5. **Fase 4** — Idempotencia + anti-fraude simulado (RN-01, RN-02).
 6. **Fase 5** — Dashboard: KPIs + gráfico, lazy loading (RF-07, RF-08, RNF-04).
 7. **Fase 6** — Tests hasta cobertura > 80%.
-8. **Fase 7** — Dockerización + despliegue GCP + CI/CD.
+8. **Fase 7** — Dockerización + despliegue en la nube + CI/CD (GCP originalmente, pivot a AWS en la Sesión 8 — ver sección 7).
 9. **Fase 8** — Preparar guion de sustentación (ver sección 9).
 
 ---
@@ -318,7 +350,7 @@ GitHub → Cloud Build (trigger en push a main)
 | 3-5 | Mostrar el use case orquestador y explicar por qué el controlador está "vacío" de lógica (SRP). |
 | 5-6 | Demo de idempotencia: doble clic real en el form, mostrar que no se duplica. |
 | 6-7 | Demo de concurrencia: dos transferencias simultáneas a la misma cuenta, saldo nunca negativo. |
-| 7-8 | Dashboard desplegado en GCP (Cloud Run + Cloud SQL) en producción. |
+| 7-8 | Dashboard desplegado en AWS (App Runner + RDS) en producción — y, si preguntan, la historia del pivot desde GCP (`OR-CBAT-23`) como ejemplo real de decisión de arquitectura bajo restricción externa. |
 | 8-9 | Cobertura de tests (mostrar reporte). |
 | 9-10 | Cierre: qué patrón usarías para el siguiente requisito hipotético que te pregunten. |
 
@@ -341,7 +373,7 @@ Respuesta corta: una billetera digital es el ejemplo de libro de texto de un sis
 | **Atomicity** | La transferencia se completa entera o no pasa nada — nunca un estado a medias. | Toda la operación (validar fondos, calcular comisión, debitar origen, acreditar destino, crear `Transaction`) vive dentro de una única transacción de Prisma. Si cualquier paso falla, se revierte todo. | `CreateTransferUseCase` (Sesión 4) + el test explícito de la Sesión 6 que verifica que un timeout de anti-fraude no deja saldos tocados a medias. |
 | **Consistency** | La base nunca permite un estado inválido, sin importar qué bug tenga la lógica de aplicación por encima. | `Decimal(14,2)` en vez de `Float` para todo el dinero (precisión IEEE 754, ver comentario en el schema); enums cerrados (`AccountType`, `AccountStatus`, `TransactionStatus`); constraints `UNIQUE` en `accountNumber`, `idempotencyKey`, `documentNumber`. | `schema.prisma`, migración `domain_model` de la Sesión 1. |
 | **Isolation** | Dos transferencias simultáneas sobre la misma cuenta no pueden leer un saldo "viejo" y pisarse una a la otra. | `SELECT ... FOR UPDATE` sobre ambas cuentas, bloqueadas siempre en orden ascendente por `id` (evita deadlocks) — respuesta directa a la advertencia explícita del enunciado ("evitar que dos retiros simultáneos dejen una cuenta en negativo"). | `CreateTransferUseCase` reforzado en la Sesión 5 + test de integración con dos transferencias concurrentes reales. |
-| **Durability** | Una vez el commit se confirma, el dato sobrevive a un crash. | Garantía nativa de Postgres, reforzada en producción por los backups automáticos y la disponibilidad gestionada de Cloud SQL. | Nivel de infraestructura (GCP), no de código de aplicación. |
+| **Durability** | Una vez el commit se confirma, el dato sobrevive a un crash. | Garantía nativa de Postgres (WAL) — en RDS (AWS, desde la Sesión 8), sin backups automáticos habilitados (`--backup-retention-period 0` en `aws-setup.sh`, trade-off deliberado de alcance/costo para esta demo, documentado en el propio script). La durabilidad de cada commit individual no depende de esa configuración; la recuperación ante la pérdida completa de la instancia sí, y es un gap conocido, no un descuido silencioso. | Nivel de infraestructura (AWS), no de código de aplicación. |
 
 ### El otro ángulo que también preguntan: "¿por qué no confiar en la aplicación (Node.js) para evitar el saldo negativo, sin bloqueos en la base de datos?"
 
