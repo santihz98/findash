@@ -1,6 +1,6 @@
 # FinDash — Billetera Digital
 
-Monorepo del proyecto FinDash. Ver [ARCHITECTURE.md](./ARCHITECTURE.md) para el diseño técnico completo y [PROGRESS.md](./PROGRESS.md) para el estado sesión a sesión.
+Monorepo del proyecto FinDash — billetera digital con backend NestJS (arquitectura hexagonal) desplegado en AWS. Ver la sección "Arquitectura" más abajo para el diseño técnico.
 
 ```
 .
@@ -9,10 +9,31 @@ Monorepo del proyecto FinDash. Ver [ARCHITECTURE.md](./ARCHITECTURE.md) para el 
 ├── docker-compose.yml             # Postgres + backend para desarrollo local
 ├── .github/workflows/deploy.yml   # CI/CD activo: test → build → push a ECR (AWS ECS Fargate)
 ├── aws-setup.sh                   # Setup inicial de AWS (ECR, RDS, Secrets Manager, rol OIDC) — ya corrido
-├── apprunner-roles-setup.sh       # Roles de App Runner (Access/Instance) — creados, sin uso (ver Sesión 9, PROGRESS.md)
+├── apprunner-roles-setup.sh       # Roles de App Runner (Access/Instance) — creados, sin uso (ver "Checklist de AWS" abajo)
 ├── ecs-setup.sh                   # Cluster/servicio ECS Fargate (reemplaza a App Runner) — ya corrido
-└── infra/gcp/cloudbuild.yaml.bak  # Pipeline original de GCP — no usado (ver Sesión 8, PROGRESS.md)
+├── validate-production.sh         # Validación end-to-end contra producción (ver "Checklist de AWS" abajo)
+└── infra/gcp/cloudbuild.yaml.bak  # Pipeline original de GCP — no usado, reemplazado por AWS
 ```
+
+---
+
+## Arquitectura
+
+**Backend — arquitectura hexagonal (Clean Architecture).** Cada módulo de negocio (`auth`, `accounts`, `transactions`, `dashboard`) se organiza en `domain/` (entidades y puertos, sin dependencias externas), `application/` (casos de uso), `infrastructure/` (adaptadores Prisma) e `interfaces/` (controllers, DTOs, guards). El dominio nunca importa Prisma ni Express directamente — se comunica con la infraestructura a través de interfaces, lo que permite testear las reglas de negocio con dobles de prueba en memoria y mantener la lógica financiera aislada de detalles de framework/DB.
+
+**Patrones de diseño centrales:**
+- **Strategy + Factory** para el cálculo de comisiones por tipo de cuenta (BASIC 2%, PREMIUM 0%, CORPORATE $5 fijo) — agregar un tipo de cuenta nuevo no requiere tocar el caso de uso que orquesta la transferencia.
+- **Repository** para toda la persistencia: los casos de uso dependen de interfaces (`IAccountRepository`, `ITransactionRepository`, etc.), nunca del ORM directamente.
+- **Excepciones de dominio + filtro global de HTTP**: las reglas de negocio (fondos insuficientes, cuenta destino inexistente, etc.) lanzan excepciones propias que un filtro central traduce a códigos HTTP — el dominio no sabe nada de HTTP.
+
+**Reglas de negocio no triviales implementadas:**
+- **Idempotencia real** (header `X-Idempotency-Key`, obligatorio en transferencias): reintentar la misma request con la misma key devuelve la respuesta original en vez de duplicar la operación.
+- **Concurrencia sin condiciones de carrera**: los balances se bloquean con `SELECT ... FOR UPDATE` en un orden determinístico (por id, no por rol origen/destino), lo que evita tanto el double-spend como deadlocks entre transferencias cruzadas simultáneas.
+- **Timeout de anti-fraude**: cada transferencia consulta un servicio anti-fraude simulado vía `Promise.race` contra un límite de 3 segundos — si no responde a tiempo, la operación se rechaza sin efectos secundarios (nada se debita ni acredita).
+
+**Stack:** backend NestJS 11 + TypeScript + Prisma + PostgreSQL; frontend Angular (en desarrollo); Docker para desarrollo local; en producción, AWS (ECS Fargate + RDS + ECR + Secrets Manager), con CI/CD en GitHub Actions autenticado vía OIDC (sin credenciales de larga duración).
+
+**Testing:** cobertura de código con umbral mínimo del 80% (statements/branches/functions/lines), verificado como gate real en el pipeline de CI, no solo en local. Incluye tests de integración contra una base de datos Postgres real (no solo mocks) para los flujos con lógica sensible a condiciones de carrera (transferencias concurrentes, idempotencia).
 
 ---
 
@@ -58,7 +79,7 @@ npm run start:dev
 
 ### Probar Auth (Sesión 2) con curl
 
-Requiere la base sembrada (`npm run prisma:migrate:deploy && npm run prisma:seed`, o `npx prisma db seed` — ver [PROGRESS.md](./PROGRESS.md) para los 4 usuarios de demo). Password de todos: `Demo1234!`.
+Requiere la base sembrada (`npm run prisma:migrate:deploy && npm run prisma:seed`, o `npx prisma db seed` — crea los 4 usuarios de demo, uno por rol/tipo de cuenta). Password de todos: `Demo1234!`.
 
 ```bash
 # Login — probar con admin@findash.dev / basic@findash.dev / premium@findash.dev / corporate@findash.dev
@@ -116,7 +137,7 @@ curl -s http://localhost:3000/accounts/me -H "Authorization: Bearer $CLIENT_TOKE
 
 `POST /transactions/transfer` es solo-CLIENT. El origen siempre es la cuenta del usuario autenticado (no se pide en el body) — cada CLIENT de demo tiene exactamente 1 cuenta, así que alcanza con loguearse. Desde la Sesión 5, el header `X-Idempotency-Key` es **obligatorio** (RN-01) — sin él, 400.
 
-**Desde la Sesión 6 (RN-02, anti-fraude simulado):** antes de confirmar cualquier transferencia, el backend consulta un servicio anti-fraude simulado que demora aleatoriamente entre 1 y 10 segundos — si tarda más de 3s, la request corta con **504** (no se debita ni acredita nada) en vez de completarse. Con el delay uniforme en ese rango, alrededor del 78% de los intentos reales va a caer en 504 y el resto en 201 — es esperable, no un bug, ver PROGRESS.md Sesión 6. Repetir el mismo comando de abajo varias veces con una key nueva cada vez para ver ambos casos.
+**Anti-fraude simulado con timeout (RN-02):** antes de confirmar cualquier transferencia, el backend consulta un servicio anti-fraude simulado que demora aleatoriamente entre 1 y 10 segundos — si tarda más de 3s, la request corta con **504** (no se debita ni acredita nada) en vez de completarse. Con el delay uniforme en ese rango, alrededor del 78% de los intentos reales va a caer en 504 y el resto en 201 — es un comportamiento esperado del timeout simulado, no un bug. Repetir el mismo comando de abajo varias veces con una key nueva cada vez para ver ambos casos.
 
 ```bash
 BASIC_TOKEN=$(curl -s -X POST http://localhost:3000/auth/login \
@@ -167,9 +188,9 @@ curl -s -w "\n%{http_code}\n" -X POST http://localhost:3000/transactions/transfe
 
 ## Checklist de AWS (pasos manuales, ya ejecutados — deploy validado en producción)
 
-**Pivot de GCP a AWS (Sesión 8):** la cuenta de facturación de GCP quedó bloqueada por el error `OR-CBAT-23`, sin resolución posible desde este lado — ver PROGRESS.md Sesión 8 para el detalle completo. El checklist de GCP original (Cloud Run + Cloud SQL + Artifact Registry + Cloud Build) queda documentado como anexo en [ARCHITECTURE.md sección 7](./ARCHITECTURE.md) y su pipeline en [infra/gcp/cloudbuild.yaml.bak](./infra/gcp/cloudbuild.yaml.bak), sin borrar — es evidencia real de trabajo hecho y de una decisión de arquitectura tomada bajo una restricción externa, no técnica.
+**Pivot de GCP a AWS:** la cuenta de facturación de GCP quedó bloqueada por el error `OR-CBAT-23`, sin resolución posible desde este lado. El checklist de GCP original (Cloud Run + Cloud SQL + Artifact Registry + Cloud Build) y su pipeline quedan documentados sin borrar en [infra/gcp/cloudbuild.yaml.bak](./infra/gcp/cloudbuild.yaml.bak) — es evidencia real de trabajo hecho y de una decisión de arquitectura tomada bajo una restricción externa, no técnica.
 
-**Segundo pivot, de App Runner a ECS Fargate (Sesión 9):** al intentar `aws apprunner create-service` (el comando que este mismo checklist documentaba en la Sesión 8), AWS respondió `SubscriptionRequiredException: The AWS Access Key Id needs a subscription for the service`. Causa confirmada: **App Runner dejó de aceptar clientes nuevos desde el 30 de abril de 2026** — la cuenta de AWS de este proyecto se creó el 27 de agosto de 2026, después de ese corte, así que nunca tuvo acceso al servicio, sin importar la configuración de roles/permisos (que sí estaba correcta). Es una restricción de producto de AWS, no un error de este proyecto — ver PROGRESS.md Sesión 9 para el detalle completo. Los dos roles de App Runner (`findash-apprunner-ecr-access`, `findash-apprunner-instance`, creados por [apprunner-roles-setup.sh](./apprunner-roles-setup.sh)) quedan sin usar — no se borraron porque no generan costo, pero **no forman parte del deploy activo**.
+**Segundo pivot, de App Runner a ECS Fargate:** al intentar `aws apprunner create-service`, AWS respondió `SubscriptionRequiredException: The AWS Access Key Id needs a subscription for the service`. Causa confirmada: **App Runner dejó de aceptar clientes nuevos desde el 30 de abril de 2026** — la cuenta de AWS de este proyecto se creó después de ese corte, así que nunca tuvo acceso al servicio, sin importar la configuración de roles/permisos (que sí estaba correcta). Es una restricción de producto de AWS, no un error de este proyecto. Los dos roles de App Runner (`findash-apprunner-ecr-access`, `findash-apprunner-instance`, creados por [apprunner-roles-setup.sh](./apprunner-roles-setup.sh)) quedan sin usar — no se borraron porque no generan costo, pero **no forman parte del deploy activo**. El cómputo real hoy es 100% ECS Fargate.
 
 Todos los scripts de esta sección ya corrieron manualmente contra la cuenta de AWS real (`683342010199`, `us-east-2`) — los recursos de abajo ya existen y el backend está sirviendo tráfico real en producción.
 
@@ -195,7 +216,7 @@ Todos los scripts de esta sección ya corrieron manualmente contra la cuenta de 
 
 - `aws-setup.sh` creó: el repositorio ECR, la instancia RDS Postgres (free tier, públicamente accesible — trade-off deliberado documentado dentro del propio script, ver la sección "Qué NO hace"), los 3 secretos en Secrets Manager, y el rol IAM + proveedor OIDC para que GitHub Actions se autentique sin access keys de larga duración.
 - `ecs-setup.sh` creó todo lo de cómputo (reemplaza a `apprunner-roles-setup.sh`, ver abajo): el Task Execution Role (pull de ECR + `AmazonECSTaskExecutionRolePolicy` + lectura de los 3 secretos al arrancar el contenedor), el Task Role (sin permisos adicionales hoy — se deja preparado por si el backend necesita llamar a otro servicio de AWS en el futuro), el grupo de logs de CloudWatch, el cluster, el security group, la task definition, y el servicio (1 tarea deseada, subnets públicas de la VPC por defecto, IP pública asignada directamente).
-- `apprunner-roles-setup.sh` (Sesión 8) creó los dos roles de App Runner — quedan documentados por completitud, pero el servicio que los habría usado nunca se pudo crear (ver el pivot de arriba).
+- `apprunner-roles-setup.sh` creó los dos roles de App Runner — quedan documentados por completitud, pero el servicio que los habría usado nunca se pudo crear (ver el pivot de arriba).
 
 ### 1. Configurar los 3 secretos del repositorio en GitHub
 
@@ -221,13 +242,13 @@ DATABASE_URL="postgresql://findash_app:LA_PASSWORD_REAL@findash-db.c3iyyk8209g1.
 
 > Recupera la password real (no quedó en ningún archivo del repo, `aws-setup.sh` la generó al vuelo con `openssl rand`) desde el secreto `DATABASE_URL` en Secrets Manager: `aws secretsmanager get-secret-value --secret-id findash/DATABASE_URL --region us-east-2 --query SecretString --output text`.
 
-Ya ejecutado en producción (Sesión 9): las 3 migraciones (`domain_model`, `add_user_document_number`, `audit_rejected_failed_transactions`) se aplicaron limpio contra la RDS real, y `prisma db seed` corrió sobre la misma base — los 4 usuarios de demo (`admin`/`basic`/`premium`/`corporate@findash.dev`) existen en producción.
+Ya ejecutado en producción: las 3 migraciones (`domain_model`, `add_user_document_number`, `audit_rejected_failed_transactions`) se aplicaron limpio contra la RDS real, y `prisma db seed` corrió sobre la misma base — los 4 usuarios de demo (`admin`/`basic`/`premium`/`corporate@findash.dev`) existen en producción.
 
 ### 3. Servicio ECS Fargate (ya creado — `ecs-setup.sh`, reemplaza al paso de App Runner)
 
-A diferencia de App Runner (que este checklist documentaba hasta la Sesión 8), no hay un único comando `create-service` de una sola vez: [ecs-setup.sh](./ecs-setup.sh) crea el cluster, la task definition y el servicio juntos (ver el detalle de cada recurso en la tabla de arriba). Ya corrió contra la cuenta real.
+A diferencia de App Runner, no hay un único comando `create-service` de una sola vez: [ecs-setup.sh](./ecs-setup.sh) crea el cluster, la task definition y el servicio juntos (ver el detalle de cada recurso en la tabla de arriba). Ya corrió contra la cuenta real.
 
-**Diferencia importante respecto a App Runner — el redeploy no es automático:** App Runner, con `AutoDeploymentsEnabled=true`, vigilaba el tag `latest` de ECR y redesplegaba solo. ECS Fargate no tiene ese comportamiento — un push a `main` que actualiza `latest` en ECR **no** dispara un redeploy de la tarea por sí solo. Desde la Sesión 9.5, `.github/workflows/deploy.yml` (job `build-and-push`) ya tiene los dos steps que lo resuelven: `aws ecs update-service --cluster findash-cluster --service findash-backend-service --force-new-deployment`, seguido de `aws ecs wait services-stable` para que el job falle si la imagen nueva no levanta. **Pendiente (manual, no aplicado todavía):** el rol `findash-github-actions-deploy` no tiene permiso de ECS hoy (solo ECR y App Runner, ver `aws-setup.sh`) — sin el fix de IAM documentado en PROGRESS.md Sesión 9.5, estos dos steps van a fallar con `AccessDenied` en el próximo push. Hasta que se aplique ese permiso, un redeploy tras un cambio de código sigue requiriendo correr el comando `update-service` a mano.
+**Redeploy automático en cada push:** App Runner, con `AutoDeploymentsEnabled=true`, vigilaba el tag `latest` de ECR y redesplegaba solo — ECS Fargate no tiene ese comportamiento nativo. `.github/workflows/deploy.yml` (job `build-and-push`) lo resuelve con dos steps explícitos después del push a ECR: `aws ecs update-service --cluster findash-cluster --service findash-backend-service --force-new-deployment`, seguido de `aws ecs wait services-stable` para que el job falle si la imagen nueva no levanta. El rol `findash-github-actions-deploy` tiene una policy inline acotada al ARN del servicio (`ecs:UpdateService` + `ecs:DescribeServices`, no acceso total a ECS) para poder correr ambos steps.
 
 Obtené la IP pública actual de la tarea (puede cambiar si ECS la reemplaza — ver el trade-off documentado en `ecs-setup.sh` sobre no usar Load Balancer):
 
@@ -237,12 +258,14 @@ ENI_ID=$(aws ecs describe-tasks --cluster findash-cluster --tasks $TASK_ARN --re
 aws ec2 describe-network-interfaces --network-interface-ids $ENI_ID --region us-east-2 --query 'NetworkInterfaces[0].Association.PublicIp' --output text
 ```
 
-Verificación real contra esa IP (Sesión 9):
-
 ```bash
 curl http://<IP_PUBLICA>:3000/health
 # → {"status":"ok","database":"connected"}
 ```
+
+### 4. Validación end-to-end automatizada (`validate-production.sh`)
+
+`./validate-production.sh <IP_PUBLICA>` corre 15 checks reales contra el backend en producción: health check, Swagger, login de los 4 usuarios del seed, RBAC (`/accounts`, `/dashboard/kpis` — 200 para ADMIN, 403 para CLIENT), el header `X-Idempotency-Key` obligatorio, una transferencia real con verificación de que reenviar la misma key no la duplica, y los KPIs del dashboard. El check de la transferencia reintenta hasta 8 veces con keys nuevas por el timeout probabilístico de RN-02 (~78% de los intentos individuales caen en 504 por diseño, no es un fallo del script). Termina con `PASS`/`FAIL` por check y código de salida no-cero si algo falló.
 
 ### Checklist resumido
 
@@ -251,18 +274,17 @@ curl http://<IP_PUBLICA>:3000/health
 - [x] `ecs-setup.sh` corrido — cluster, task definition y servicio ECS Fargate.
 - [x] 3 secretos configurados en GitHub (Settings > Secrets and variables > Actions).
 - [x] Schema migrado contra la RDS real (`prisma migrate deploy` + `prisma db seed`).
-- [x] Push a `main` → workflow corre y sube la imagen a ECR (verificado con `aws ecr describe-images`).
+- [x] Push a `main` → workflow corre, sube la imagen a ECR y redespliega el servicio automáticamente (`force-new-deployment` + `wait services-stable`).
 - [x] Servicio ECS alcanzó steady state (`runningCount: 1`, sin tareas caídas).
-- [x] `/health` verificado con `curl` real contra la IP pública de la tarea.
-- [x] Step de `aws ecs update-service --force-new-deployment` + `aws ecs wait services-stable` agregado al workflow (Sesión 9.5).
-- [ ] Permiso IAM `ecs:UpdateService`/`ecs:DescribeServices` aplicado al rol `findash-github-actions-deploy` (comando documentado en PROGRESS.md Sesión 9.5, pendiente de correr) — sin esto, el workflow va a fallar en los dos steps nuevos.
-- [ ] Push a `main` verificado end-to-end: la tarea de ECS efectivamente se reemplaza con la imagen nueva (confirmable con `aws ecs describe-tasks`, mirando `startedAt` antes/después del push).
+- [x] Permiso IAM `ecs:UpdateService`/`ecs:DescribeServices` aplicado al rol `findash-github-actions-deploy`.
+- [x] `validate-production.sh` corrido contra la IP pública real: 15/15 checks en verde.
+- [x] Push a `main` verificado end-to-end: el redeploy automático reemplaza la tarea de ECS con la imagen nueva sin intervención manual.
 
 ---
 
 ## Conexión ECS Fargate ↔ RDS
 
-Mismo criterio que tenía documentado App Runner (Sesión 8): como la instancia de RDS se creó públicamente accesible (trade-off deliberado de `aws-setup.sh`, ver el comentario en ese script), la tarea de ECS se conecta por **TCP normal con TLS**, exactamente el mismo tipo de conexión que Prisma ya usa en local — solo cambia el host y `sslmode`. El pivot de App Runner a ECS Fargate no cambió nada acá: ambos son simplemente cómputo containerizado hablándole a la misma RDS por la misma red pública.
+Mismo criterio que tenía documentado App Runner: como la instancia de RDS se creó públicamente accesible (trade-off deliberado de `aws-setup.sh`, ver el comentario en ese script), la tarea de ECS se conecta por **TCP normal con TLS**, exactamente el mismo tipo de conexión que Prisma ya usa en local — solo cambia el host y `sslmode`. El pivot de App Runner a ECS Fargate no cambió nada acá: ambos son simplemente cómputo containerizado hablándole a la misma RDS por la misma red pública.
 
 | Entorno | Formato de `DATABASE_URL` |
 |---|---|
