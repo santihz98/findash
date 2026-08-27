@@ -382,6 +382,56 @@ Error: Could not assume role with OIDC: Not authorized to perform sts:AssumeRole
 
 **Verificado:** YAML re-parseado (`ruby -ryaml`) confirmando la estructura resultante — `permissions` de nivel workflow con solo `contents: read`; el job `test` sin ningún bloque de `permissions` propio (hereda el de arriba); el job `build-and-push` con `{ id-token: write, contents: read }` explícito. El resto del archivo (`services: postgres`, el gate de `test:cov`, los tags de ECR) permanece exactamente igual a como quedó documentado en la Sesión 8.
 
+### Sesión 9 — Deploy real en AWS: dos bugs más de OIDC, pivot de App Runner a ECS Fargate, validación en producción ✅ (2026-08-27)
+
+**Todo lo de esta sesión ocurrió fuera de las sesiones de Claude Code** — manualmente en la terminal del usuario y en la consola de AWS, siguiendo el "Próximo paso" que dejó la Sesión 8. Se documenta acá con el mismo nivel de detalle que el resto de la bitácora; no se ejecutó nada nuevo al escribir esto, la infraestructura ya existe y está funcionando en producción, verificada.
+
+**Parte 1 — dos bugs más de OIDC (mismo error superficial, causas distintas cada vez):**
+
+El primer fix (`permissions: id-token: write` faltante en el job `build-and-push`) ya quedó documentado arriba, en "Bug real encontrado en la primera corrida del pipeline". Con ese fix aplicado, el workflow volvió a fallar **dos veces más**, con el mismo síntoma superficial (`Not authorized to perform sts:AssumeRoleWithWebIdentity`) pero dos causas reales distintas — diagnosticadas con evidencia real (logs de GitHub Actions, la trust policy en vivo del rol, y el JWT real decodificado), no por prueba y error a ciegas:
+
+- **Bug 2 — faltaba `sts:TagSession` en la trust policy.** El log de la corrida mostraba explícitamente "7 role session tags are being used": `aws-actions/configure-aws-credentials@v4` agrega session tags automáticamente a la llamada de `AssumeRoleWithWebIdentity`. La trust policy de `findash-github-actions-deploy` (creada por `aws-setup.sh` en la Sesión 8) solo autorizaba `sts:AssumeRoleWithWebIdentity` en su `Action` — sin `sts:TagSession` también ahí, AWS rechaza la llamada aunque el resto de la policy esté bien. Corregido cambiando `Action` a un array con las dos acciones (aplicado primero a mano, contra el rol ya existente, en la consola de AWS).
+- **Bug 3 — la causa real: el claim `sub` del JWT no sigue el patrón estándar.** Con los dos permisos anteriores ya corregidos, el workflow seguía fallando exactamente igual. Se agregó un step temporal de debug al job `build-and-push` (`DEBUG - decodificar el token OIDC real`, decodifica el payload del JWT que GitHub emite vía `ACTIONS_ID_TOKEN_REQUEST_TOKEN`) para ver el `sub` real en vez de asumirlo. Resultado: `repo:santihz98@64707493/findash@1348871348:ref:refs/heads/main` — GitHub incluye los IDs numéricos de owner y de repositorio (`@64707493`, `@1348871348`), no el patrón "de libro" `repo:OWNER/REPO:ref:refs/heads/BRANCH` que asumía la trust policy original (y buena parte de la documentación pública de esta integración). El `StringLike` nunca iba a matchear. Corregido actualizando el patrón a `repo:santihz98@64707493/findash@1348871348:*`.
+
+Con los 3 fixes aplicados (2 en la trust policy vivo del rol, 1 en el workflow), el pipeline corrió exitosamente de punta a punta: `Test (Postgres real + cobertura)` ✅ y `Build + push a ECR` ✅ — autenticación OIDC, login a ECR, y build+push de la imagen con los dos tags (SHA del commit y `latest`). Confirmado con `aws ecr describe-images --repository-name findash-backend --region us-east-2` que ambos tags existen realmente en el repositorio.
+
+El step de debug cumplió su propósito de diagnóstico y **se eliminó de `.github/workflows/deploy.yml`** — no debía quedar en el pipeline final. `aws-setup.sh` se actualizó para que la trust policy que genera refleje los dos fixes reales (Bugs 2 y 3) — sin este ajuste, el script hubiera quedado documentando una versión del rol que ya no es la que existe de verdad en AWS, algo que el proyecto evita a propósito en todos lados (ver, por ejemplo, la corrección de la fila de Durability en el anexo ACID, Sesión 8).
+
+**Parte 2 — el pivot forzado de App Runner a ECS Fargate:**
+
+Al ejecutar manualmente el `aws apprunner create-service` que la Sesión 8 dejó documentado en el README (el paso siguiente del checklist), el comando falló con:
+
+```
+SubscriptionRequiredException: The AWS Access Key Id needs a subscription for the service
+```
+
+Causa confirmada por búsqueda: **AWS App Runner dejó de aceptar clientes nuevos a partir del 30 de abril de 2026.** La cuenta de AWS de este proyecto se creó el 27 de agosto de 2026 — después de esa fecha de corte — así que nunca tuvo acceso a App Runner, sin importar la configuración. No fue un error de permisos ni de IAM: los roles de App Runner de la Sesión 8 (`findash-apprunner-ecr-access`, `findash-apprunner-instance`) se habían creado correctamente — el problema apareció un paso después, al intentar crear el servicio en sí. Es una restricción de producto del lado de AWS, fuera de control de este proyecto.
+
+Se pivotó a **ECS Fargate** — reutiliza exactamente el mismo ECR, la misma RDS y los mismos 3 secretos de Secrets Manager ya provisionados en la Sesión 8; de nuevo, un cambio de infraestructura de cómputo, cero cambios en `backend/src/` (mismo patrón que ya estableció el pivot GCP→AWS de la Sesión 8).
+
+**Recursos reales creados (`ecs-setup.sh`, nuevo en la raíz del repo, cuenta `683342010199`, región `us-east-2`):**
+
+- `findash-ecs-execution` (IAM role): pull de ECR + `AmazonECSTaskExecutionRolePolicy` + policy inline para leer los 3 secretos al arrancar el contenedor.
+- `findash-ecs-task` (IAM role): rol de tarea en runtime, sin permisos adicionales hoy — se deja preparado por si el backend necesita llamar a otro servicio de AWS en el futuro.
+- `/ecs/findash-backend` (CloudWatch Logs group).
+- `findash-cluster` (ECS cluster).
+- `findash-ecs-sg` (security group, puerto 3000 abierto a `0.0.0.0/0` — mismo criterio de simplificación consciente ya documentado para el security group de RDS en `aws-setup.sh`).
+- `findash-backend` (task definition, Fargate, 512 CPU / 1024 memoria, imagen `:latest` de ECR, los 3 secretos inyectados vía `secrets` — no `environment` — de la definición de contenedor).
+- `findash-backend-service` (ECS service, 1 tarea deseada, subnets públicas de la VPC por defecto, IP pública asignada directamente).
+
+**Trade-off documentado explícitamente, no un descuido:** sin Application Load Balancer, la tarea tiene una IP pública que puede cambiar si ECS la reemplaza (redeploy, fallo de health check, etc.) — aceptable para esta demo, no para un entorno real (ahí correspondería un ALB con DNS estable). Documentado también en `ecs-setup.sh` y en README.md.
+
+**Los dos roles de App Runner de la Sesión 8 quedan sin usar** — no se borraron (no generan costo). Documentados en README.md y en el nuevo anexo de ARCHITECTURE.md sección 7 para que no parezcan un cabo suelto sin explicación: existen porque el plan original de cómputo era App Runner, y dejaron de usarse en cuanto se confirmó el bloqueo de producto descrito arriba.
+
+**Parte 3 — deploy validado en producción:**
+
+- `prisma migrate deploy` corrido manualmente contra la RDS real: las 3 migraciones (`domain_model`, `add_user_document_number`, `audit_rejected_failed_transactions`) se aplicaron limpio.
+- `prisma db seed` corrido contra la misma RDS: los 4 usuarios de demo (`admin`/`basic`/`premium`/`corporate@findash.dev`) existen en producción.
+- El servicio ECS alcanzó "steady state" (`runningCount: 1`, deployment completado, sin tareas detenidas por fallos).
+- `GET /health` contra la IP pública de la tarea respondió `{"status":"ok","database":"connected"}` — confirmado con `curl` real, no solo "el servicio dice RUNNING".
+
+**Documentación actualizada en esta sesión:** README.md (sección "Checklist de AWS" reescrita para ECS Fargate — recursos reales, comando de verificación de IP pública, nota explícita sobre por qué se abandonó App Runner con la fecha de corte) y ARCHITECTURE.md sección 7 (mismo criterio ya usado para conservar el anexo de GCP: la sección de App Runner no se borra, se marca como "intentado, bloqueado por restricción de producto de AWS", con un anexo nuevo dedicado a esto).
+
 ## Próximo paso
 
-Push a `main` → verificar que `.github/workflows/deploy.yml` corre y sube la imagen a ECR (con los 3 secretos de GitHub ya configurados, ver README.md) → migrar el schema contra la RDS real (`prisma migrate deploy`, paso 2 del checklist) → correr manualmente el `aws apprunner create-service` documentado en el README (una sola vez) → validar `GET /health` contra la URL pública de App Runner.
+**Sesión 9.5** (ya definida): agregar un step nuevo al workflow de GitHub Actions que ejecute `aws ecs update-service --cluster findash-cluster --service findash-backend-service --force-new-deployment` después del push a ECR — a diferencia de App Runner (que vigilaba el tag `latest` automáticamente vía `AutoDeploymentsEnabled`), ECS Fargate necesita este trigger explícito para que cada push a `main` efectivamente redespliegue la tarea con la imagen nueva. Hasta que ese step exista, un redeploy tras un cambio de código en producción requiere correr `aws ecs update-service --force-new-deployment` a mano.

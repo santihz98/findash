@@ -47,6 +47,15 @@ GITHUB_ORG="santihz98"
 GITHUB_REPO="findash"
 GITHUB_ROLE_NAME="findash-github-actions-deploy"
 
+# El claim `sub` que GitHub genera para este repo NO sigue el formato
+# estándar "repo:OWNER/REPO:ref:refs/heads/BRANCH" — incluye los IDs
+# numéricos de owner y repo (confirmado decodificando el JWT real en la
+# primera corrida del pipeline, ver PROGRESS.md Sesión 9):
+# "repo:santihz98@64707493/findash@1348871348:ref:refs/heads/main". Un
+# StringLike con el patrón estándar (sin estos IDs) nunca matchea.
+GITHUB_OWNER_ID="64707493"
+GITHUB_REPO_ID="1348871348"
+
 echo "=============================================="
 echo "AWS_REGION:        $AWS_REGION"
 echo "ECR_REPO_NAME:      $ECR_REPO_NAME"
@@ -150,6 +159,12 @@ aws secretsmanager create-secret \
 # ---------------------------------------------------------------------------
 # 4. Rol IAM para GitHub Actions vía OIDC (sin access keys de larga duración)
 # ---------------------------------------------------------------------------
+# Trust policy corregida tras la primera corrida real del pipeline (ver
+# PROGRESS.md Sesión 9): `sts:AssumeRoleWithWebIdentity` solo no alcanza
+# porque aws-actions/configure-aws-credentials@v4 agrega session tags
+# automáticamente a la llamada, lo que exige también `sts:TagSession`. Y el
+# `sub` real que emite GitHub para este repo trae los IDs numéricos de
+# owner/repo, no el patrón estándar sin ellos.
 echo "--> Configurando el proveedor OIDC de GitHub (si no existe)..."
 aws iam create-open-id-connect-provider \
   --url "https://token.actions.githubusercontent.com" \
@@ -166,13 +181,13 @@ TRUST_POLICY=$(cat <<EOF
       "Principal": {
         "Federated": "arn:aws:iam::${AWS_ACCOUNT_ID}:oidc-provider/token.actions.githubusercontent.com"
       },
-      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Action": ["sts:AssumeRoleWithWebIdentity", "sts:TagSession"],
       "Condition": {
         "StringEquals": {
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
         },
         "StringLike": {
-          "token.actions.githubusercontent.com:sub": "repo:${GITHUB_ORG}/${GITHUB_REPO}:*"
+          "token.actions.githubusercontent.com:sub": "repo:${GITHUB_ORG}@${GITHUB_OWNER_ID}/${GITHUB_REPO}@${GITHUB_REPO_ID}:*"
         }
       }
     }

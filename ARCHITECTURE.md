@@ -25,7 +25,7 @@ El reto no es "hacer que funcione", es demostrar que el sistema **puede absorber
 | Frontend | Angular (standalone components) | Requisito del documento. |
 | Estado global | **NgRx** | Cumple RNF-03: ningún componente presentacional inyecta `HttpClient`. |
 | Auth | JWT (access + refresh) | RF-01. |
-| Cloud | **AWS**: App Runner + RDS + Secrets Manager + Firebase Hosting (desde la Sesión 8 — diseño original en GCP, ver sección 7 y su Anexo) | Containerizado, HTTPS/autoescalado gestionados, CI/CD simple con GitHub Actions vía OIDC. |
+| Cloud | **AWS**: ECS Fargate + RDS + Secrets Manager + Firebase Hosting (desde la Sesión 8 — diseño original en GCP, ver sección 7 y su Anexo; App Runner intentado primero, bloqueado por restricción de producto de AWS, pivot a ECS Fargate en la Sesión 9) | Containerizado, HTTPS gestionado en RDS/Secrets Manager, CI/CD simple con GitHub Actions vía OIDC. |
 | Testing | Jest (backend) + Jasmine/Jest (frontend) | Cobertura > 80% exigida. |
 
 ---
@@ -280,33 +280,39 @@ Configura `jest.config.js` con `coverageThreshold: { global: { branches: 80, fun
 
 ## 7. CI/CD y despliegue en AWS
 
-**Nube activa desde la Sesión 8.** El diseño original apuntaba a GCP (ver el Anexo al final de esta sección) — la cuenta de facturación de GCP quedó bloqueada por el error `OR-CBAT-23`, sin resolución posible desde este lado, y el proyecto migró a AWS. La arquitectura de aplicación (hexagonal, Docker) es la misma sin ningún cambio de código; lo que cambió es exclusivamente la infraestructura y el pipeline.
+**Nube activa desde la Sesión 8, cómputo en ECS Fargate desde la Sesión 9.** El diseño original apuntaba a GCP (ver el Anexo al final de esta sección) — la cuenta de facturación de GCP quedó bloqueada por el error `OR-CBAT-23`, sin resolución posible desde este lado, y el proyecto migró a AWS. Dentro de AWS, el plan original de cómputo era App Runner (Sesión 8) — **intentado, bloqueado por una restricción de producto de AWS** (App Runner dejó de aceptar clientes nuevos desde el 30 de abril de 2026, y la cuenta de este proyecto se creó después de ese corte; ver PROGRESS.md Sesión 9 para el detalle completo, incluida la respuesta real de AWS). El pivot a ECS Fargate reemplaza únicamente la capa de cómputo — reutiliza el mismo ECR, la misma RDS y los mismos 3 secretos ya provisionados en la Sesión 8. La arquitectura de aplicación (hexagonal, Docker) es la misma sin ningún cambio de código en ninguno de los dos pivots (GCP→AWS, App Runner→ECS); lo que cambió cada vez es exclusivamente la infraestructura y el pipeline.
 
 ```
 GitHub → GitHub Actions (trigger en push a main, .github/workflows/deploy.yml)
    ├── Backend:  install → prisma generate → test contra Postgres efímero
    │             (coverage gate real, test:cov) → Docker build → push a ECR
    │             (tags: SHA del commit + latest)
-   │             → App Runner redespliega solo (AutoDeploymentsEnabled=true,
-   │               vigila el tag `latest` de ECR — no hay un step de "deploy"
-   │               explícito en el workflow, a diferencia del Cloud Run
-   │               original)
+   │             → [pendiente, Sesión 9.5] step explícito `aws ecs
+   │               update-service --force-new-deployment` — a diferencia de
+   │               App Runner (que hubiera vigilado `latest` solo, vía
+   │               AutoDeploymentsEnabled), ECS Fargate necesita este
+   │               trigger explícito para que un push a `main` efectivamente
+   │               redespliegue la tarea con la imagen nueva
    ├── Frontend: build (ng build --prod) → deploy a Firebase Hosting (sin cambios de la Sesión 0)
    └── DB:       RDS (Postgres) — igual que con Cloud SQL, las migraciones de
                  Prisma NO corren automáticamente contra la base de
                  producción en ningún pipeline (ni el de GCP ni el actual) —
                  es un paso manual documentado en README.md, sección
-                 "Checklist de AWS".
+                 "Checklist de AWS", ya ejecutado una vez en la Sesión 9.
 ```
 
-- **Secrets Manager**: `DATABASE_URL`, `JWT_SECRET`, `JWT_REFRESH_SECRET` — nunca en el repo. Inyectados a App Runner vía `RuntimeEnvironmentSecrets` (equivalente a `--set-secrets` de Cloud Run).
-- **ECR** (Elastic Container Registry): reemplaza a Artifact Registry — mismo rol, registro de imágenes Docker privado.
-- **App Runner**: reemplaza a Cloud Run — backend containerizado, HTTPS + balanceo + autoescalado gestionados. A diferencia de Cloud Run, App Runner no escala a cero (siempre hay al menos una instancia corriendo) — trade-off de costo aceptado explícitamente por simplicidad de setup en el tiempo acotado de este proyecto (ver `aws-setup.sh`).
-- **RDS**: reemplaza a Cloud SQL. Conexión por **TCP/TLS estándar** (`sslmode=require`), no por Cloud SQL Auth Proxy/socket Unix — la instancia se creó públicamente accesible (trade-off deliberado, documentado en `aws-setup.sh`), así que no hace falta un VPC connector ni ningún mecanismo de proxy integrado. Ver README.md, sección "Conexión App Runner ↔ RDS".
-- **Autenticación de GitHub Actions vía OIDC**: `aws-actions/configure-aws-credentials` asume un rol IAM (`findash-github-actions-deploy`) con un proveedor OIDC de confianza hacia `token.actions.githubusercontent.com` — nunca access keys de larga duración guardadas como secreto de GitHub. Mismo principio de seguridad que ya regía para JWT/passwords en el resto del proyecto: nada sensible de larga vida vive en texto plano en un secreto de CI.
-- **Firebase Hosting**: sin cambios respecto al diseño original — sigue sirviendo el build de Angular, no depende de qué nube aloja el backend.
+- **Secrets Manager**: `DATABASE_URL`, `JWT_SECRET`, `JWT_REFRESH_SECRET` — nunca en el repo. Inyectados a la tarea de ECS vía el campo `secrets` (no `environment`) de la definición de contenedor — equivalente funcional al `RuntimeEnvironmentSecrets` que habría usado App Runner.
+- **ECR** (Elastic Container Registry): reemplaza a Artifact Registry — mismo rol, registro de imágenes Docker privado. Sin cambios entre los dos pivots.
+- **ECS Fargate**: reemplaza a App Runner (que a su vez habría reemplazado a Cloud Run). Backend containerizado corriendo como tarea Fargate (512 CPU / 1024 memoria), sin Load Balancer — la tarea recibe una IP pública directa (subnets públicas de la VPC por defecto), trade-off deliberado para esta demo: la IP puede cambiar si ECS reemplaza la tarea (redeploy, fallo de health check), algo que en un entorno real se resolvería con un Application Load Balancer + DNS estable. A diferencia de App Runner, ECS Fargate tampoco escala a cero — mismo trade-off de costo que ya se había aceptado en la Sesión 8, sin cambios.
+- **RDS**: reemplaza a Cloud SQL. Conexión por **TCP/TLS estándar** (`sslmode=require`), no por Cloud SQL Auth Proxy/socket Unix — la instancia se creó públicamente accesible (trade-off deliberado, documentado en `aws-setup.sh`), así que no hace falta un VPC connector ni ningún mecanismo de proxy integrado. Ver README.md, sección "Conexión ECS Fargate ↔ RDS".
+- **Autenticación de GitHub Actions vía OIDC**: `aws-actions/configure-aws-credentials` asume un rol IAM (`findash-github-actions-deploy`) con un proveedor OIDC de confianza hacia `token.actions.githubusercontent.com` — nunca access keys de larga duración guardadas como secreto de GitHub. Mismo principio de seguridad que ya regía para JWT/passwords en el resto del proyecto: nada sensible de larga vida vive en texto plano en un secreto de CI. La trust policy real requiere tanto `sts:AssumeRoleWithWebIdentity` como `sts:TagSession` (esta última porque `aws-actions/configure-aws-credentials@v4` agrega session tags automáticamente), y un `sub` con el formato real que GitHub emite para este repo (incluye los IDs numéricos de owner/repositorio, no solo `OWNER/REPO`) — ver PROGRESS.md Sesión 9 para cómo se diagnosticó.
+- **Firebase Hosting**: sin cambios respecto al diseño original — sigue sirviendo el build de Angular, no depende de qué nube ni qué servicio de cómputo aloja el backend.
 
-Detalle completo de recursos reales, comandos de setup, y el `aws apprunner create-service` completo: README.md, sección "Checklist de AWS".
+Detalle completo de recursos reales, comandos de setup (`aws-setup.sh`, `ecs-setup.sh`), y la verificación de `/health` en producción: README.md, sección "Checklist de AWS".
+
+### Anexo — App Runner (intentado, bloqueado por restricción de producto de AWS, ver PROGRESS.md Sesión 9)
+
+Plan original de cómputo dentro de AWS (Sesión 8): los dos roles IAM que necesitaba (`findash-apprunner-ecr-access` para el `pull` de ECR, `findash-apprunner-instance` para leer los 3 secretos en runtime) se crearon correctamente vía `apprunner-roles-setup.sh` y siguen existiendo, sin uso, sin costo. El bloqueo apareció un paso después, al ejecutar `aws apprunner create-service`: `SubscriptionRequiredException`. Causa confirmada — no un error de configuración de este proyecto: **AWS App Runner dejó de aceptar clientes nuevos a partir del 30 de abril de 2026**, y la cuenta de AWS de este proyecto se creó el 27 de agosto de 2026, después de ese corte. Reemplazado por ECS Fargate (ver arriba) — mismo ECR, misma RDS, mismos secretos, cero cambios de código de aplicación.
 
 ### Anexo — despliegue alternativo en GCP (no usado, ver PROGRESS.md Sesión 8)
 
@@ -350,7 +356,7 @@ GitHub → Cloud Build (trigger en push a main)
 | 3-5 | Mostrar el use case orquestador y explicar por qué el controlador está "vacío" de lógica (SRP). |
 | 5-6 | Demo de idempotencia: doble clic real en el form, mostrar que no se duplica. |
 | 6-7 | Demo de concurrencia: dos transferencias simultáneas a la misma cuenta, saldo nunca negativo. |
-| 7-8 | Dashboard desplegado en AWS (App Runner + RDS) en producción — y, si preguntan, la historia del pivot desde GCP (`OR-CBAT-23`) como ejemplo real de decisión de arquitectura bajo restricción externa. |
+| 7-8 | Dashboard desplegado en AWS (ECS Fargate + RDS) en producción — y, si preguntan, la historia de los dos pivots (GCP→AWS por `OR-CBAT-23`, y App Runner→ECS Fargate por el corte de nuevos clientes del 30 abr 2026) como ejemplo real de decisiones de arquitectura bajo restricción externa. |
 | 8-9 | Cobertura de tests (mostrar reporte). |
 | 9-10 | Cierre: qué patrón usarías para el siguiente requisito hipotético que te pregunten. |
 
