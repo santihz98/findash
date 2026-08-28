@@ -4,6 +4,7 @@ import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { Store } from '@ngrx/store';
 
 import { SkeletonLoaderComponent } from '../../../shared/components/skeleton-loader/skeleton-loader.component';
+import { generateUuid } from '../../../shared/utils/uuid.util';
 import { positiveDecimalAmountValidator } from '../../../shared/validators/positive-decimal-amount.validator';
 import { accountLookupActions } from '../../../state/accountLookup/account-lookup.actions';
 import {
@@ -412,12 +413,12 @@ export class TransferFormPage {
       return;
     }
     const idempotencyKey =
-      presentation.retryStrategy === 'same-key' ? this.lastIdempotencyKey : crypto.randomUUID();
+      presentation.retryStrategy === 'same-key' ? this.lastIdempotencyKey : generateUuid();
     this.dispatchTransfer(idempotencyKey, this.lastDestAccountId);
   }
 
   private beginTransfer(destAccountId: string): void {
-    this.dispatchTransfer(crypto.randomUUID(), destAccountId);
+    this.dispatchTransfer(generateUuid(), destAccountId);
   }
 
   private dispatchTransfer(idempotencyKey: string, destAccountId: string): void {
