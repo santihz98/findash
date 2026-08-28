@@ -10,6 +10,8 @@ import { Store, provideState, provideStore } from '@ngrx/store';
 import { routes } from '../../../app.routes';
 import { CurrentUser } from '../../../state/auth/auth.model';
 import { authFeature } from '../../../state/auth/auth.reducer';
+import { AccountLookupEffects } from '../../../state/accountLookup/account-lookup.effects';
+import { accountLookupFeature } from '../../../state/accountLookup/account-lookup.reducer';
 import { MyAccountEffects } from '../../../state/myAccount/my-account.effects';
 import { myAccountFeature } from '../../../state/myAccount/my-account.reducer';
 import { TransferEffects } from '../../../state/transfer/transfer.effects';
@@ -24,9 +26,11 @@ const clientUser: CurrentUser = {
 };
 
 /**
- * Test de integración real (tarea 12): Store + MyAccountEffects/TransferEffects
- * + Router + guard reales, sin mocks de NgRx. El único doble es
- * `HttpTestingController` — un backend fake, nunca el real.
+ * Test de integración real (tarea 12, Sesión 15; ampliado en la Sesión 20
+ * para cubrir la resolución accountNumber -> id): Store + MyAccountEffects/
+ * TransferEffects/AccountLookupEffects + Router + guard reales, sin mocks
+ * de NgRx. El único doble es `HttpTestingController` — un backend fake,
+ * nunca el real.
  */
 describe('transfer flow (integración real, backend fake)', () => {
   let httpMock: HttpTestingController;
@@ -41,7 +45,8 @@ describe('transfer flow (integración real, backend fake)', () => {
         provideState(authFeature),
         provideState(myAccountFeature),
         provideState(transferFeature),
-        provideEffects([MyAccountEffects, TransferEffects]),
+        provideState(accountLookupFeature),
+        provideEffects([MyAccountEffects, TransferEffects, AccountLookupEffects]),
       ],
     });
     httpMock = TestBed.inject(HttpTestingController);
@@ -56,7 +61,7 @@ describe('transfer flow (integración real, backend fake)', () => {
 
   afterEach(() => httpMock.verify());
 
-  it('flujo completo exitoso: submit -> 201 -> saldo actualizado -> formulario limpio', async () => {
+  it('flujo completo exitoso: número de cuenta -> lookup -> confirmación -> submit -> 201 -> saldo actualizado -> formulario limpio', async () => {
     configure();
     const harness = await RouterTestingHarness.create('/transfer');
 
@@ -75,12 +80,27 @@ describe('transfer flow (integración real, backend fake)', () => {
 
     expect(harness.routeNativeElement?.textContent).toContain('898.00');
 
-    const destInput = harness.routeDebugElement!.query(By.css('input[formControlName=destAccountId]'))
-      .nativeElement as HTMLInputElement;
+    const destInput = harness.routeDebugElement!.query(
+      By.css('input[formControlName=destAccountNumber]'),
+    ).nativeElement as HTMLInputElement;
     const amountInput = harness.routeDebugElement!.query(By.css('input[formControlName=amount]'))
       .nativeElement as HTMLInputElement;
-    destInput.value = 'acc-2';
+    destInput.value = '1000000002';
     destInput.dispatchEvent(new Event('input'));
+    destInput.dispatchEvent(new Event('blur'));
+    harness.detectChanges();
+
+    // El blur dispara la resolución accountNumber -> id ANTES del submit —
+    // confirma la cuenta destino visualmente antes de mover dinero.
+    const lookupReq = httpMock.expectOne(
+      (r) => r.url === 'accounts/lookup' && r.params.get('accountNumber') === '1000000002',
+    );
+    lookupReq.flush({ id: 'dest-real-uuid', accountNumber: '1000000002', accountType: 'PREMIUM' });
+    await harness.fixture.whenStable();
+    harness.detectChanges();
+
+    expect(harness.routeNativeElement?.textContent).toContain('PREMIUM');
+
     amountInput.value = '100.00';
     amountInput.dispatchEvent(new Event('input'));
     harness.detectChanges();
@@ -88,12 +108,14 @@ describe('transfer flow (integración real, backend fake)', () => {
     harness.routeDebugElement!.query(By.css('form')).triggerEventHandler('ngSubmit', undefined);
 
     const transferReq = httpMock.expectOne((r) => r.url === 'transactions/transfer');
-    expect(transferReq.request.body).toEqual({ destAccountId: 'acc-2', amount: '100.00' });
+    // El POST real usa el `id` YA RESUELTO — nunca el número de cuenta que
+    // el usuario tipeó (criterio de aceptación explícito de la sesión).
+    expect(transferReq.request.body).toEqual({ destAccountId: 'dest-real-uuid', amount: '100.00' });
     expect(transferReq.request.headers.get('X-Idempotency-Key')).toBeTruthy();
     transferReq.flush({
       id: 'tx-1',
       originAccountId: 'acc-1',
-      destAccountId: 'acc-2',
+      destAccountId: 'dest-real-uuid',
       amount: '100.00',
       commission: '2.00',
       authorizationCode: 'REAL123CODE',
@@ -104,8 +126,8 @@ describe('transfer flow (integración real, backend fake)', () => {
     harness.detectChanges();
 
     expect(harness.routeNativeElement?.textContent).toContain('REAL123CODE');
-    expect((destInput as HTMLInputElement).value).toBe('');
-    expect((amountInput as HTMLInputElement).value).toBe('');
+    expect(destInput.value).toBe('');
+    expect(amountInput.value).toBe('');
 
     // El éxito re-despacha loadMyAccount (refresca el saldo) — hace falta
     // responder ese segundo request antes de poder afirmar sobre el saldo
@@ -126,6 +148,55 @@ describe('transfer flow (integración real, backend fake)', () => {
     expect(harness.routeNativeElement?.textContent).toContain('796.00');
   });
 
+  it('404 en el lookup se muestra ANTES de intentar el POST real, y nunca dispara la transferencia', async () => {
+    configure();
+    const harness = await RouterTestingHarness.create('/transfer');
+
+    httpMock.expectOne((r) => r.url === 'accounts/me').flush([
+      {
+        id: 'acc-1',
+        accountNumber: '1000000001',
+        balance: '898.00',
+        accountType: 'BASIC',
+        status: 'ACTIVE',
+        avatarUrl: null,
+      },
+    ]);
+    await harness.fixture.whenStable();
+    harness.detectChanges();
+
+    const destInput = harness.routeDebugElement!.query(
+      By.css('input[formControlName=destAccountNumber]'),
+    ).nativeElement as HTMLInputElement;
+    const amountInput = harness.routeDebugElement!.query(By.css('input[formControlName=amount]'))
+      .nativeElement as HTMLInputElement;
+    destInput.value = '9999999999';
+    destInput.dispatchEvent(new Event('input'));
+    destInput.dispatchEvent(new Event('blur'));
+    amountInput.value = '10.00';
+    amountInput.dispatchEvent(new Event('input'));
+    harness.detectChanges();
+
+    httpMock
+      .expectOne((r) => r.url === 'accounts/lookup' && r.params.get('accountNumber') === '9999999999')
+      .flush(
+        { statusCode: 404, message: 'La cuenta destino "9999999999" no existe', error: 'Not Found' },
+        { status: 404, statusText: 'Not Found' },
+      );
+    await harness.fixture.whenStable();
+    harness.detectChanges();
+
+    expect(harness.routeNativeElement?.textContent).toContain('no existe');
+
+    harness.routeDebugElement!.query(By.css('form')).triggerEventHandler('ngSubmit', undefined);
+    harness.detectChanges();
+
+    // El submit NO dispara ningún POST /transactions/transfer: la
+    // resolución ya falló para este número, el usuario tiene que
+    // corregirlo primero (ver TransferFormPage.submit()).
+    httpMock.expectNone((r) => r.url === 'transactions/transfer');
+  });
+
   it('defensa en profundidad: montado sin roleGuard, un 403 real del backend al transferir no rompe la página', async () => {
     // Monta el container solo, en una ruta SIN roleGuard, simulando
     // exactamente el escenario que RolesGuard del backend ya cubre en
@@ -138,7 +209,8 @@ describe('transfer flow (integración real, backend fake)', () => {
         provideStore({}),
         provideState(myAccountFeature),
         provideState(transferFeature),
-        provideEffects([MyAccountEffects, TransferEffects]),
+        provideState(accountLookupFeature),
+        provideEffects([MyAccountEffects, TransferEffects, AccountLookupEffects]),
       ],
     });
     httpMock = TestBed.inject(HttpTestingController);
@@ -158,14 +230,22 @@ describe('transfer flow (integración real, backend fake)', () => {
     await harness.fixture.whenStable();
     harness.detectChanges();
 
-    const destInput = harness.routeDebugElement!.query(By.css('input[formControlName=destAccountId]'))
-      .nativeElement as HTMLInputElement;
+    const destInput = harness.routeDebugElement!.query(
+      By.css('input[formControlName=destAccountNumber]'),
+    ).nativeElement as HTMLInputElement;
     const amountInput = harness.routeDebugElement!.query(By.css('input[formControlName=amount]'))
       .nativeElement as HTMLInputElement;
-    destInput.value = 'acc-2';
+    destInput.value = '1000000002';
     destInput.dispatchEvent(new Event('input'));
+    destInput.dispatchEvent(new Event('blur'));
     amountInput.value = '50.00';
     amountInput.dispatchEvent(new Event('input'));
+    harness.detectChanges();
+
+    httpMock
+      .expectOne((r) => r.url === 'accounts/lookup')
+      .flush({ id: 'dest-real-uuid', accountNumber: '1000000002', accountType: 'PREMIUM' });
+    await harness.fixture.whenStable();
     harness.detectChanges();
 
     harness.routeDebugElement!.query(By.css('form')).triggerEventHandler('ngSubmit', undefined);
@@ -184,6 +264,6 @@ describe('transfer flow (integración real, backend fake)', () => {
     // Se maneja como cualquier otro error (tarea 7): sin retry (403 no está
     // en la lista de códigos reintentables) y el form conserva los datos.
     expect(banner.query(By.css('button'))).toBeFalsy();
-    expect(destInput.value).toBe('acc-2');
+    expect(destInput.value).toBe('1000000002');
   });
 });

@@ -8,6 +8,7 @@ import { provideEffects } from '@ngrx/effects';
 import { Store, provideState, provideStore } from '@ngrx/store';
 
 import { routes } from '../../../app.routes';
+import { accountLookupFeature } from '../../../state/accountLookup/account-lookup.reducer';
 import { CurrentUser, initialAuthState } from '../../../state/auth/auth.model';
 import { authFeature } from '../../../state/auth/auth.reducer';
 import { AccountsEffects } from '../../../state/accounts/accounts.effects';
@@ -47,6 +48,7 @@ describe('account list flow (integración real, backend fake)', () => {
         // motivo documentado en login-flow.integration.spec.ts.
         provideState(myAccountFeature),
         provideState(transferFeature),
+        provideState(accountLookupFeature),
         provideEffects([AccountsEffects]),
       ],
     });

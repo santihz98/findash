@@ -9,6 +9,8 @@ import { routes } from './app.routes';
 import { provideAppConfigInitializer } from './core/config/config.initializer';
 import { apiConfigInterceptor } from './core/interceptors/api-config.interceptor';
 import { jwtInterceptor } from './core/interceptors/jwt.interceptor';
+import { AccountLookupEffects } from './state/accountLookup/account-lookup.effects';
+import { accountLookupFeature } from './state/accountLookup/account-lookup.reducer';
 import { AccountsEffects } from './state/accounts/accounts.effects';
 import { accountsFeature } from './state/accounts/accounts.reducer';
 import { AuthEffects } from './state/auth/auth.effects';
@@ -41,6 +43,7 @@ export const appConfig: ApplicationConfig = {
     provideState(transferFeature),
     provideState(myTransactionsFeature),
     provideState(transactionsAuditFeature),
+    provideState(accountLookupFeature),
     provideEffects([
       AuthEffects,
       AccountsEffects,
@@ -48,6 +51,7 @@ export const appConfig: ApplicationConfig = {
       TransferEffects,
       MyTransactionsEffects,
       TransactionsAuditEffects,
+      AccountLookupEffects,
     ]),
     provideStoreDevtools({ maxAge: 25, logOnly: !isDevMode() }),
   ],

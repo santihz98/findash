@@ -55,4 +55,17 @@ describe('AccountsService', () => {
 
     expect(result).toEqual([account]);
   });
+
+  it('lookup() hits GET accounts/lookup with accountNumber as a query param', () => {
+    let result: unknown;
+    service.lookup('1000000002').subscribe((r) => (result = r));
+
+    const req = httpMock.expectOne((r) => r.url === 'accounts/lookup' && r.method === 'GET');
+    expect(req.request.params.get('accountNumber')).toBe('1000000002');
+
+    const resolved = { id: 'dest-1', accountNumber: '1000000002', accountType: 'PREMIUM' };
+    req.flush(resolved);
+
+    expect(result).toEqual(resolved);
+  });
 });

@@ -4,6 +4,7 @@ import { RouterTestingHarness } from '@angular/router/testing';
 import { provideMockStore } from '@ngrx/store/testing';
 
 import { routes } from './app.routes';
+import { initialAccountLookupState } from './state/accountLookup/account-lookup.model';
 import { initialAccountsState } from './state/accounts/accounts.model';
 import { CurrentUser, initialAuthState } from './state/auth/auth.model';
 import { initialMyAccountState } from './state/myAccount/my-account.model';
@@ -87,6 +88,7 @@ describe('routes', () => {
             auth: { ...initialAuthState, accessToken: 'a', user: clientUser },
             myAccount: initialMyAccountState,
             transfer: initialTransferState,
+            accountLookup: initialAccountLookupState,
           },
         }),
       ],
@@ -108,6 +110,7 @@ describe('routes', () => {
             auth: { ...initialAuthState, accessToken: 'a', user: clientUser },
             myAccount: initialMyAccountState,
             transfer: initialTransferState,
+            accountLookup: initialAccountLookupState,
           },
         }),
       ],

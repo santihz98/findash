@@ -10,6 +10,7 @@ import { Store, provideState, provideStore } from '@ngrx/store';
 import { routes } from '../../app.routes';
 import { jwtInterceptor } from '../../core/interceptors/jwt.interceptor';
 import { TokenStorageService } from '../../core/services/token-storage.service';
+import { accountLookupFeature } from '../../state/accountLookup/account-lookup.reducer';
 import { AccountsEffects } from '../../state/accounts/accounts.effects';
 import { accountsFeature } from '../../state/accounts/accounts.reducer';
 import { AuthEffects } from '../../state/auth/auth.effects';
@@ -44,6 +45,7 @@ describe('login flow (integración real, backend fake)', () => {
         // undefined" sin el feature registrado).
         provideState(myAccountFeature),
         provideState(transferFeature),
+        provideState(accountLookupFeature),
         provideEffects([AuthEffects, AccountsEffects]),
       ],
     });

@@ -8,6 +8,7 @@ import { provideEffects } from '@ngrx/effects';
 import { Store, provideState, provideStore } from '@ngrx/store';
 
 import { routes } from '../../../app.routes';
+import { accountLookupFeature } from '../../../state/accountLookup/account-lookup.reducer';
 import { CurrentUser } from '../../../state/auth/auth.model';
 import { authFeature } from '../../../state/auth/auth.reducer';
 import { MyAccountEffects } from '../../../state/myAccount/my-account.effects';
@@ -62,6 +63,7 @@ describe('transactions audit flow (integración real, backend fake)', () => {
         provideState(myAccountFeature),
         provideState(transferFeature),
         provideState(myTransactionsFeature),
+        provideState(accountLookupFeature),
         provideEffects([TransactionsAuditEffects, MyAccountEffects, TransferEffects, MyTransactionsEffects]),
       ],
     });

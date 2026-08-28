@@ -1,9 +1,17 @@
-import { Component, effect, inject } from '@angular/core';
+import { Component, effect, inject, signal } from '@angular/core';
+import { toSignal } from '@angular/core/rxjs-interop';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { Store } from '@ngrx/store';
 
 import { SkeletonLoaderComponent } from '../../../shared/components/skeleton-loader/skeleton-loader.component';
 import { positiveDecimalAmountValidator } from '../../../shared/validators/positive-decimal-amount.validator';
+import { accountLookupActions } from '../../../state/accountLookup/account-lookup.actions';
+import {
+  selectAccountLookupError,
+  selectAccountLookupLoading,
+  selectAccountLookupRequestedAccountNumber,
+  selectAccountLookupResult,
+} from '../../../state/accountLookup/account-lookup.reducer';
 import { myAccountActions } from '../../../state/myAccount/my-account.actions';
 import {
   selectMyAccount,
@@ -27,22 +35,35 @@ import {
  * error con retry sin perder el saldo previo) + formulario reactivo de
  * transferencia.
  *
- * **Decisión — cuenta destino: id crudo, no búsqueda por número de
- * cuenta (tarea 4, explícita a documentar).** Se evaluó agregar un campo
- * "número de cuenta" con una búsqueda que resuelva a un id antes de
- * enviar — pero un CLIENT no tiene ningún endpoint autorizado para
- * resolver esa búsqueda: `GET /accounts` (el único que filtra/lista
- * cuentas) es `@Roles(Role.ADMIN)` (confirmado con curl real: 403 para
- * `basic@findash.dev`), y `GET /accounts/me` solo devuelve las cuentas
- * PROPIAS del usuario autenticado, nunca las de terceros. No existe hoy
- * ningún endpoint que un CLIENT pueda usar para mapear "número de cuenta
- * de otra persona" -> id. Agregar esa búsqueda habría significado
- * inventar un endpoint nuevo en el backend, fuera del alcance de esta
- * sesión (el contrato de `POST /transactions/transfer` ya está cerrado
- * desde la Sesión 4/5/6) — así que el campo pide el id directo, con una
- * ayuda visual explicando qué se espera. Si en el futuro se agrega un
- * endpoint de búsqueda pública/parcial por número de cuenta, este
- * formulario es el punto a revisar.
+ * **Decisión — cuenta destino: número de cuenta legible, resuelto a `id`
+ * vía `GET /accounts/lookup` (Sesión 20, backend Sesión 19, reemplaza la
+ * decisión de la Sesión 15 documentada más abajo).** Hasta esta sesión el
+ * campo pedía el `id` (UUID) crudo porque no existía ningún endpoint que
+ * un CLIENT pudiera usar para resolver "número de cuenta de un tercero" ->
+ * id — un bloqueante real de UX/producto (ver PROGRESS.md Sesión 19): en
+ * ningún punto de la aplicación un CLIENT llega a ver el UUID de una cuenta
+ * ajena, así que el formulario era funcionalmente inutilizable para un
+ * usuario real. Con `GET /accounts/lookup?accountNumber=XXXX` (cualquier
+ * rol autenticado, `{ id, accountNumber, accountType }`, 404 si no existe)
+ * ese bloqueante se cierra: el usuario tipea el número, el formulario
+ * resuelve el `id` por su cuenta y lo usa para el POST real — el contrato
+ * de `POST /transactions/transfer` (`destAccountId` UUID) no cambió.
+ *
+ * **Cuándo se resuelve — on-blur, no solo al submit (tarea 2 de la
+ * sesión, decisión documentada):** se eligió resolver al salir del campo
+ * (`(blur)`) en vez de esperar al submit porque el enunciado mismo señala
+ * el beneficio real de esa opción — mostrar una confirmación visual antes
+ * de mover dinero ("vas a transferir a una cuenta CORPORATE"), que reduce
+ * el riesgo de transferir al número equivocado sin que el usuario se dé
+ * cuenta hasta ver el resultado. Además queda un fallback defensivo en
+ * `submit()`: si por lo que sea el blur nunca disparó la resolución para el
+ * valor actual del campo (ej. el usuario pega el número y aprieta Enter sin
+ * que el campo llegue a perder el foco — el comportamiento exacto de
+ * submit-por-Enter varía entre navegadores), `submit()` dispara la
+ * resolución en ese momento y completa el envío real recién cuando
+ * responde (ver el segundo `effect()` del constructor) — nunca se llega a
+ * hacer `POST /transactions/transfer` con un `id` que no corresponda
+ * exactamente al número que el usuario tiene tipeado.
  */
 @Component({
   selector: 'app-transfer-form-page',
@@ -104,19 +125,33 @@ import {
 
       <form class="transfer-form" [formGroup]="form" (ngSubmit)="submit()">
         <label class="field">
-          Cuenta destino (id)
+          Número de cuenta destino
           <input
             type="text"
-            formControlName="destAccountId"
-            placeholder="id de la cuenta destino"
+            formControlName="destAccountNumber"
+            placeholder="ej. 1000000002"
+            (blur)="onDestAccountNumberBlur()"
             [class.is-invalid]="
-              form.controls.destAccountId.touched && form.controls.destAccountId.invalid
+              (form.controls.destAccountNumber.touched && form.controls.destAccountNumber.invalid) ||
+              (isLookupCurrent(destAccountNumberValue()) && !!lookupError())
             "
           />
           @if (
-            form.controls.destAccountId.touched && form.controls.destAccountId.hasError('required')
+            form.controls.destAccountNumber.touched &&
+            form.controls.destAccountNumber.hasError('required')
           ) {
             <span class="field-error">La cuenta destino es obligatoria.</span>
+          }
+          @if (isLookupCurrent(destAccountNumberValue())) {
+            @if (lookupLoading()) {
+              <span class="lookup-status lookup-status--loading">Resolviendo cuenta destino…</span>
+            } @else if (lookupError(); as lookupErr) {
+              <span class="lookup-status lookup-status--error field-error">{{ lookupErr }}</span>
+            } @else if (lookupResult(); as resolved) {
+              <span class="lookup-status lookup-status--success">
+                Vas a transferir a una cuenta <strong>{{ resolved.accountType }}</strong>.
+              </span>
+            }
           }
         </label>
 
@@ -142,9 +177,15 @@ import {
           type="submit"
           class="btn btn--primary"
           [class.btn--loading]="submitting()"
-          [disabled]="submitting() || form.invalid"
+          [disabled]="submitting() || form.invalid || lookupLoading()"
         >
-          {{ submitting() ? 'Verificando la transferencia…' : 'Transferir' }}
+          {{
+            submitting()
+              ? 'Verificando la transferencia…'
+              : lookupLoading()
+                ? 'Resolviendo cuenta destino…'
+                : 'Transferir'
+          }}
         </button>
       </form>
     </main>
@@ -205,6 +246,20 @@ import {
       align-self: flex-start;
       min-width: 10rem;
     }
+
+    .lookup-status {
+      display: block;
+      font-size: var(--fs-sm);
+      margin-top: var(--space-1);
+    }
+
+    .lookup-status--loading {
+      color: var(--color-ink-muted);
+    }
+
+    .lookup-status--success {
+      color: var(--color-success);
+    }
   `,
 })
 export class TransferFormPage {
@@ -227,10 +282,38 @@ export class TransferFormPage {
     return status !== null && message !== null ? describeTransferError(status, message) : null;
   };
 
+  readonly lookupResult = this.store.selectSignal(selectAccountLookupResult);
+  readonly lookupLoading = this.store.selectSignal(selectAccountLookupLoading);
+  readonly lookupError = this.store.selectSignal(selectAccountLookupError);
+  readonly lookupRequestedFor = this.store.selectSignal(selectAccountLookupRequestedAccountNumber);
+
   readonly form = this.formBuilder.nonNullable.group({
-    destAccountId: ['', [Validators.required]],
+    destAccountNumber: ['', [Validators.required]],
     amount: ['', [Validators.required, positiveDecimalAmountValidator]],
   });
+
+  /**
+   * Valor actual del campo, como signal real (`toSignal` sobre
+   * `valueChanges`) — a diferencia de otros `form.controls.x.value` leídos
+   * directo en templates de este proyecto (ver PROGRESS.md Sesión 18), acá
+   * SÍ hace falta un signal de verdad: el template lo usa dentro de la
+   * condición de un `@if` (para decidir si mostrar el bloque de
+   * confirmación/error de la resolución), y leer el `.value` mutable
+   * directo ahí producía `NG0100` (el valor podía diferir entre la pasada
+   * de chequeo y la de `checkNoChanges` de Angular en modo dev) — un signal
+   * real no tiene ese problema porque solo cambia ante una emisión real de
+   * `valueChanges`, nunca "espontáneamente" entre las dos pasadas de un
+   * mismo `detectChanges()`.
+   */
+  private readonly rawDestAccountNumber = toSignal(
+    this.form.controls.destAccountNumber.valueChanges,
+    { initialValue: this.form.controls.destAccountNumber.value },
+  );
+  readonly destAccountNumberValue = () => this.rawDestAccountNumber().trim();
+
+  /** true si la resolución en el Store corresponde EXACTAMENTE al valor tipeado ahora mismo. */
+  readonly isLookupCurrent = (accountNumber: string) =>
+    accountNumber.length > 0 && this.lookupRequestedFor() === accountNumber;
 
   /**
    * Key del intento en curso/último — plain field, NO Store: es estado
@@ -239,6 +322,17 @@ export class TransferFormPage {
    * el mismo valor en el caso 409 (tarea 5/11, ver transfer-error.util.ts).
    */
   private lastIdempotencyKey: string | null = null;
+  /** `id` real (UUID) ya resuelto que usó el último intento — `retry()` reusa este, nunca vuelve a resolver. */
+  private lastDestAccountId: string | null = null;
+
+  /**
+   * Señal de "hay un submit esperando a que termine una resolución
+   * disparada por el propio submit()" — tiene que ser un signal (no un
+   * campo plano) para que el `effect()` de abajo, que la lee, vuelva a
+   * correr cuando cambia (los `effect()` de Angular solo reaccionan a
+   * señales leídas dentro de su cuerpo).
+   */
+  private readonly pendingSubmit = signal(false);
 
   constructor() {
     this.store.dispatch(myAccountActions.loadMyAccount());
@@ -247,9 +341,32 @@ export class TransferFormPage {
     // saldo (volver a despachar loadMyAccount) — tarea 5, caso 201.
     effect(() => {
       if (this.result()) {
-        this.form.reset({ destAccountId: '', amount: '' });
+        this.form.reset({ destAccountNumber: '', amount: '' });
         this.store.dispatch(myAccountActions.loadMyAccount());
       }
+    });
+
+    // Completa el submit disparado por el fallback de `submit()` (el blur
+    // nunca llegó a resolver el número actual) apenas la resolución
+    // dispuesta ahí mismo responde — éxito o error, nunca deja el "pending"
+    // colgado. Lee las 4 señales SIN early-return antes de leerlas todas,
+    // para que el effect quede suscripto a las 4 y vuelva a correr con
+    // cualquiera de sus cambios (ver el comentario de `pendingSubmit`).
+    effect(() => {
+      const pending = this.pendingSubmit();
+      const loading = this.lookupLoading();
+      const resolved = this.lookupResult();
+      this.lookupError();
+      if (!pending || loading) {
+        return;
+      }
+      this.pendingSubmit.set(false);
+      if (resolved && this.isLookupCurrent(resolved.accountNumber)) {
+        this.beginTransfer(resolved.id);
+      }
+      // Si falló, no hacemos nada más: el mensaje ya se muestra vía el
+      // bloque `isLookupCurrent() && lookupError()` del template — el
+      // usuario tiene que corregir el número e intentar de nuevo.
     });
   }
 
@@ -257,29 +374,56 @@ export class TransferFormPage {
     this.store.dispatch(myAccountActions.loadMyAccount());
   }
 
+  onDestAccountNumberBlur(): void {
+    const accountNumber = this.destAccountNumberValue();
+    if (accountNumber && accountNumber !== this.lookupRequestedFor()) {
+      this.store.dispatch(accountLookupActions.lookupAccount({ accountNumber }));
+    }
+  }
+
   submit(): void {
     if (this.form.invalid) {
       this.form.markAllAsTouched();
       return;
     }
-    this.dispatchTransfer(crypto.randomUUID());
+    const accountNumber = this.destAccountNumberValue();
+    if (this.isLookupCurrent(accountNumber)) {
+      const resolved = this.lookupResult();
+      if (resolved) {
+        this.beginTransfer(resolved.id);
+      }
+      // Ya hay un error resuelto para este mismo número (ej. 404) — no
+      // reintentamos solos, el usuario tiene que corregirlo primero.
+      return;
+    }
+    // El blur no llegó a resolver el número actual — resolvemos ahora
+    // mismo; el submit real se completa en el effect() de arriba apenas
+    // el lookup responda.
+    this.pendingSubmit.set(true);
+    this.store.dispatch(accountLookupActions.lookupAccount({ accountNumber }));
   }
 
   retry(): void {
     const presentation = this.errorPresentation();
-    if (!presentation) {
+    // `lastDestAccountId`/`lastIdempotencyKey` siempre se setean juntos (ver
+    // `dispatchTransfer`) — ambos null significa "nunca hubo un submit
+    // real todavía", el mismo caso defensivo de siempre.
+    if (!presentation || !this.lastDestAccountId || !this.lastIdempotencyKey) {
       return;
     }
     const idempotencyKey =
-      presentation.retryStrategy === 'same-key'
-        ? (this.lastIdempotencyKey ?? crypto.randomUUID())
-        : crypto.randomUUID();
-    this.dispatchTransfer(idempotencyKey);
+      presentation.retryStrategy === 'same-key' ? this.lastIdempotencyKey : crypto.randomUUID();
+    this.dispatchTransfer(idempotencyKey, this.lastDestAccountId);
   }
 
-  private dispatchTransfer(idempotencyKey: string): void {
+  private beginTransfer(destAccountId: string): void {
+    this.dispatchTransfer(crypto.randomUUID(), destAccountId);
+  }
+
+  private dispatchTransfer(idempotencyKey: string, destAccountId: string): void {
     this.lastIdempotencyKey = idempotencyKey;
-    const { destAccountId, amount } = this.form.getRawValue();
+    this.lastDestAccountId = destAccountId;
+    const { amount } = this.form.getRawValue();
     this.store.dispatch(transferActions.submitTransfer({ destAccountId, amount, idempotencyKey }));
   }
 }
