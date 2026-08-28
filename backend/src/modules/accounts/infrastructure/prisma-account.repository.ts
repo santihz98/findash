@@ -7,7 +7,7 @@ import {
   ListAccountsFilter,
   ListAccountsResult,
 } from '../domain/ports/account.repository.port';
-import { Account, AccountWithOwner } from '../domain/entities/account.entity';
+import { Account, AccountLookupResult, AccountWithOwner } from '../domain/entities/account.entity';
 
 @Injectable()
 export class PrismaAccountRepository implements IAccountRepository {
@@ -132,6 +132,16 @@ export class PrismaAccountRepository implements IAccountRepository {
       status: row.status,
       avatarUrl: row.avatar_url,
     };
+  }
+
+  async findByAccountNumber(accountNumber: string): Promise<AccountLookupResult | null> {
+    // `select` explícito, no `findUnique` + mapeo manual: así el propio
+    // query nunca trae balance/userId a memoria, ni por descuido en un
+    // cambio futuro de este método (ver comentario del puerto).
+    return this.prisma.account.findUnique({
+      where: { accountNumber },
+      select: { id: true, accountNumber: true, accountType: true },
+    });
   }
 }
 

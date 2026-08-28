@@ -14,6 +14,7 @@ describe('GetMyAccountsUseCase', () => {
       findById: jest.fn(),
       updateBalance: jest.fn(),
       findByIdForUpdate: jest.fn(),
+      findByAccountNumber: jest.fn(),
     };
     useCase = new GetMyAccountsUseCase(accountRepository);
   });

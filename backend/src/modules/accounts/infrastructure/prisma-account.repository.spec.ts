@@ -240,4 +240,27 @@ describe('PrismaAccountRepository (integración real contra Postgres)', () => {
     );
     expect(found).toBeNull();
   });
+
+  it('findByAccountNumber resuelve accountNumber -> id, sin traer balance/documentNumber/email', async () => {
+    const found = await repository.findByAccountNumber('TESTACC-A-0001');
+
+    expect(found).not.toBeNull();
+    expect(found?.accountNumber).toBe('TESTACC-A-0001');
+    expect(found?.accountType).toBe(AccountType.BASIC);
+    expect(found).toEqual({ id: found?.id, accountNumber: 'TESTACC-A-0001', accountType: AccountType.BASIC });
+    expect(found).not.toHaveProperty('balance');
+    expect(found).not.toHaveProperty('userId');
+  });
+
+  it('findByAccountNumber resuelve la cuenta de OTRO usuario igual (es una búsqueda de resolución, no de datos propios)', async () => {
+    const found = await repository.findByAccountNumber('TESTACC-B-0001');
+
+    expect(found?.accountType).toBe(AccountType.BASIC);
+    expect(found).not.toHaveProperty('balance');
+  });
+
+  it('findByAccountNumber devuelve null para un accountNumber que no existe', async () => {
+    const found = await repository.findByAccountNumber('NOPE-DOES-NOT-EXIST');
+    expect(found).toBeNull();
+  });
 });

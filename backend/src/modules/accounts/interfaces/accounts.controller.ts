@@ -3,7 +3,9 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 import { Role } from '@prisma/client';
 import { ListAccountsUseCase } from '../application/use-cases/list-accounts.use-case';
 import { GetMyAccountsUseCase } from '../application/use-cases/get-my-accounts.use-case';
+import { LookupAccountByNumberUseCase } from '../application/use-cases/lookup-account-by-number.use-case';
 import { ListAccountsQueryDto } from './dto/list-accounts-query.dto';
+import { LookupAccountQueryDto } from './dto/lookup-account-query.dto';
 import { JwtAuthGuard } from '../../../shared/guards/jwt-auth.guard';
 import { RolesGuard } from '../../../shared/guards/roles.guard';
 import { Roles } from '../../../shared/decorators/roles.decorator';
@@ -18,6 +20,7 @@ export class AccountsController {
   constructor(
     private readonly listAccountsUseCase: ListAccountsUseCase,
     private readonly getMyAccountsUseCase: GetMyAccountsUseCase,
+    private readonly lookupAccountByNumberUseCase: LookupAccountByNumberUseCase,
   ) {}
 
   // RF-03. Orden de guards importa: JwtAuthGuard puebla request.user antes
@@ -82,5 +85,36 @@ export class AccountsController {
   @ApiResponse({ status: 401, description: 'Token ausente, inválido o expirado.' })
   me(@CurrentUser() user: AccessTokenPayload) {
     return this.getMyAccountsUseCase.execute(user.sub);
+  }
+
+  // Cualquier rol autenticado, sin @Roles() — un CLIENT necesita poder
+  // resolver el accountNumber de UN TERCERO (destino de una transferencia)
+  // tanto como un ADMIN, así que el guard no discrimina por rol; lo que
+  // acota el alcance es la forma de la respuesta, no quién puede llamarlo.
+  // Es una búsqueda de resolución (accountNumber -> id), no un endpoint de
+  // consulta de datos: nunca devuelve balance, documentNumber, email ni
+  // status, a propósito.
+  @UseGuards(JwtAuthGuard)
+  @Get('lookup')
+  @ApiOperation({
+    summary:
+      'Resuelve un accountNumber (visible en pantalla) a su id (UUID) — paso previo para completar destAccountId en POST /transactions/transfer. Cualquier rol autenticado; jamás expone balance/documentNumber/email de terceros.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Solo id, accountNumber y accountType — nada de balance ni datos del titular.',
+    schema: {
+      example: {
+        id: '57d1b569-5127-44d7-b464-2e6a2a2ef17b',
+        accountNumber: '1000000003',
+        accountType: 'PREMIUM',
+      },
+    },
+  })
+  @ApiResponse({ status: 400, description: 'accountNumber ausente o vacío.' })
+  @ApiResponse({ status: 401, description: 'Token ausente, inválido o expirado.' })
+  @ApiResponse({ status: 404, description: 'No existe ninguna cuenta con ese accountNumber.' })
+  lookup(@Query() query: LookupAccountQueryDto) {
+    return this.lookupAccountByNumberUseCase.execute(query.accountNumber);
   }
 }

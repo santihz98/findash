@@ -80,6 +80,13 @@ class FakeAccountRepository implements IAccountRepository {
     return this.findById(id);
   }
 
+  async findByAccountNumber(accountNumber: string): Promise<Account | null> {
+    const row = this.rows.find((r) => r.accountNumber === accountNumber);
+    if (!row) return null;
+    const { userId: _userId, ...rest } = row;
+    return rest;
+  }
+
   async updateBalance(id: string, newBalance: Prisma.Decimal): Promise<void> {
     const row = this.rows.find((r) => r.id === id);
     if (row) row.balance = newBalance.toFixed(2);

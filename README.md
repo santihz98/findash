@@ -135,9 +135,33 @@ curl -s -w "\n%{http_code}\n" http://localhost:3000/accounts -H "Authorization: 
 curl -s http://localhost:3000/accounts/me -H "Authorization: Bearer $CLIENT_TOKEN"
 ```
 
+### Probar resolución de accountNumber -> id (Sesión 18, RF-02) con curl
+
+`GET /accounts/lookup?accountNumber=XXXX` — cualquier rol autenticado (sin `@Roles()`). Resuelve el `accountNumber` legible (lo único que un CLIENT ve de una cuenta ajena en cualquier pantalla) al `id` (UUID) que pide `destAccountId` en `POST /transactions/transfer`. Es el paso que le faltaba al frontend: sin este endpoint, un CLIENT real (sin acceso a `curl` ni a `GET /accounts` de ADMIN) no tenía ninguna forma de completar una transferencia a una cuenta ajena. Respuesta deliberadamente mínima — **nunca** `balance`, `documentNumber`, `email` ni `status`, ni para el ADMIN ni para el propio dueño de la cuenta consultada: es una búsqueda de resolución, no un endpoint de datos.
+
+```bash
+BASIC_TOKEN=$(curl -s -X POST http://localhost:3000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"basic@findash.dev","password":"Demo1234!"}' | python3 -c "import json,sys;print(json.load(sys.stdin)['accessToken'])")
+
+# Resuelve la cuenta PREMIUM de demo (ajena a basic@findash.dev) a su id
+curl -s "http://localhost:3000/accounts/lookup?accountNumber=1000000002" -H "Authorization: Bearer $BASIC_TOKEN"
+# → {"id":"...","accountNumber":"1000000002","accountType":"PREMIUM"} — sin balance ni documentNumber ni email
+
+# accountNumber ausente o vacío -> 400
+curl -s -w "\n%{http_code}\n" "http://localhost:3000/accounts/lookup" -H "Authorization: Bearer $BASIC_TOKEN"
+curl -s -w "\n%{http_code}\n" "http://localhost:3000/accounts/lookup?accountNumber=" -H "Authorization: Bearer $BASIC_TOKEN"
+
+# accountNumber que no existe -> 404 (misma DestinationAccountNotFoundException que POST /transactions/transfer)
+curl -s -w "\n%{http_code}\n" "http://localhost:3000/accounts/lookup?accountNumber=9999999999" -H "Authorization: Bearer $BASIC_TOKEN"
+
+# Sin token -> 401
+curl -s -w "\n%{http_code}\n" "http://localhost:3000/accounts/lookup?accountNumber=1000000002"
+```
+
 ### Probar Transactions (Sesión 4/5/6) con curl
 
-`POST /transactions/transfer` es solo-CLIENT. El origen siempre es la cuenta del usuario autenticado (no se pide en el body) — cada CLIENT de demo tiene exactamente 1 cuenta, así que alcanza con loguearse. Desde la Sesión 5, el header `X-Idempotency-Key` es **obligatorio** (RN-01) — sin él, 400.
+`POST /transactions/transfer` es solo-CLIENT. El origen siempre es la cuenta del usuario autenticado (no se pide en el body) — cada CLIENT de demo tiene exactamente 1 cuenta, así que alcanza con loguearse. Desde la Sesión 5, el header `X-Idempotency-Key` es **obligatorio** (RN-01) — sin él, 400. El ejemplo de abajo resuelve `PREMIUM_ID` vía el listado de ADMIN (`GET /accounts`) por comodidad del script — un CLIENT real sin acceso a ese listado resuelve el mismo id con `GET /accounts/lookup?accountNumber=...` (ver sección de arriba, Sesión 18), que es el camino que de verdad usa el frontend.
 
 **Anti-fraude simulado con timeout (RN-02):** antes de confirmar cualquier transferencia, el backend consulta un servicio anti-fraude simulado que demora aleatoriamente entre 1 y 10 segundos — si tarda más de 3s, la request corta con **504** (no se debita ni acredita nada) en vez de completarse. Con el delay uniforme en ese rango, alrededor del 78% de los intentos reales va a caer en 504 y el resto en 201 — es un comportamiento esperado del timeout simulado, no un bug. Repetir el mismo comando de abajo varias veces con una key nueva cada vez para ver ambos casos.
 

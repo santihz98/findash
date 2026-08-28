@@ -28,3 +28,19 @@ export interface AccountWithOwner extends Account {
   documentNumber: string;
   email: string;
 }
+
+/**
+ * Resultado de `GET /accounts/lookup` (RF-02, Sesión 18) — resuelve el
+ * `accountNumber` legible que ve un CLIENT en pantalla al `id` (UUID) que
+ * pide `POST /transactions/transfer` en `destAccountId`. Deliberadamente
+ * NO extiende `Account`: no es un subconjunto por descarte de campos en la
+ * capa de interfaces, es una forma distinta con menos datos por diseño —
+ * ni `balance` ni ningún dato del titular (`documentNumber`/`email`) tienen
+ * cabida acá, así que ninguna capa por encima de este tipo puede filtrarlos
+ * por accidente. Ver `IAccountRepository.findByAccountNumber`.
+ */
+export interface AccountLookupResult {
+  id: string;
+  accountNumber: string;
+  accountType: AccountType;
+}

@@ -1,5 +1,5 @@
 import { AccountStatus, Prisma } from '@prisma/client';
-import { Account, AccountWithOwner } from '../entities/account.entity';
+import { Account, AccountLookupResult, AccountWithOwner } from '../entities/account.entity';
 import { TransactionContext } from '../../../../shared/database/transaction-context';
 
 export interface ListAccountsFilter {
@@ -48,6 +48,16 @@ export interface IAccountRepository {
    * además refleja en la firma que `trx` deja de ser opcional.
    */
   findByIdForUpdate(id: string, trx: TransactionContext): Promise<Account | null>;
+
+  /**
+   * RF-02 (Sesión 18) — resuelve `accountNumber` (lo único que un CLIENT ve
+   * de una cuenta ajena) a `id` (UUID, lo que pide `destAccountId` en
+   * `POST /transactions/transfer`). El SELECT en la implementación de
+   * Prisma trae explícitamente solo estas 3 columnas — ni siquiera carga
+   * `balance`/`userId` a memoria de la aplicación, defensa en profundidad
+   * más allá de que el controller tampoco las devolvería.
+   */
+  findByAccountNumber(accountNumber: string): Promise<AccountLookupResult | null>;
 }
 
 export const ACCOUNT_REPOSITORY = Symbol('ACCOUNT_REPOSITORY');

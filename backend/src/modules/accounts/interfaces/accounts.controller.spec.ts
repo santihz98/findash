@@ -8,13 +8,14 @@ import { AccountsModule } from '../accounts.module';
 import { USER_REPOSITORY, IUserRepository } from '../../auth/domain/ports/user.repository.port';
 import { AuthUser } from '../../auth/domain/entities/auth-user.entity';
 import { PasswordHasherService } from '../../auth/application/services/password-hasher.service';
+import { DomainExceptionFilter } from '../../../shared/filters/http-exception.filter';
 import {
   ACCOUNT_REPOSITORY,
   IAccountRepository,
   ListAccountsFilter,
   ListAccountsResult,
 } from '../domain/ports/account.repository.port';
-import { Account, AccountWithOwner } from '../domain/entities/account.entity';
+import { Account, AccountLookupResult, AccountWithOwner } from '../domain/entities/account.entity';
 
 const TEST_ACCESS_SECRET = 'accounts-integration-access-secret';
 const TEST_REFRESH_SECRET = 'accounts-integration-refresh-secret';
@@ -77,6 +78,12 @@ class FakeAccountRepository implements IAccountRepository {
   findByIdForUpdate(id: string): Promise<Account | null> {
     return this.findById(id);
   }
+
+  async findByAccountNumber(accountNumber: string): Promise<AccountLookupResult | null> {
+    const row = this.rows.find((r) => r.accountNumber === accountNumber);
+    if (!row) return null;
+    return { id: row.id, accountNumber: row.accountNumber, accountType: row.accountType };
+  }
 }
 
 describe('Accounts (integración): guards, roles, paginación, /me', () => {
@@ -84,6 +91,7 @@ describe('Accounts (integración): guards, roles, paginación, /me', () => {
   let admin: AuthUser;
   let client1: AuthUser;
   let client2: AuthUser;
+  let accountRows: FakeAccountRow[];
 
   async function loginAndGetToken(email: string): Promise<string> {
     const res = await request(app.getHttpServer())
@@ -120,7 +128,7 @@ describe('Accounts (integración): guards, roles, paginación, /me', () => {
     };
 
     // 25 cuentas para poder probar paginación con más de una página real.
-    const accountRows: FakeAccountRow[] = Array.from({ length: 25 }, (_, i) => ({
+    accountRows = Array.from({ length: 25 }, (_, i) => ({
       id: `acc-${i + 1}`,
       userId: i % 2 === 0 ? client1.id : client2.id,
       accountNumber: `100000${String(i + 1).padStart(4, '0')}`,
@@ -158,6 +166,7 @@ describe('Accounts (integración): guards, roles, paginación, /me', () => {
 
     app = moduleRef.createNestApplication();
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+    app.useGlobalFilters(new DomainExceptionFilter());
     await app.init();
   });
 
@@ -326,6 +335,84 @@ describe('Accounts (integración): guards, roles, paginación, /me', () => {
 
     it('devuelve 401 sin token', async () => {
       await request(app.getHttpServer()).get('/accounts/me').expect(401);
+    });
+  });
+
+  describe('GET /accounts/lookup (cualquier rol autenticado)', () => {
+    it('un CLIENT puede resolver el accountNumber de OTRO usuario (caso de uso central)', async () => {
+      const token = await loginAndGetToken(client1.email);
+      // acc-2 pertenece a client2 (índice 1, impar) — client1 resolviendo
+      // la cuenta de un tercero es exactamente el flujo que desbloquea el
+      // formulario de transferencia.
+      const target = accountRows.find((r) => r.id === 'acc-2')!;
+      expect(target.userId).toBe(client2.id);
+
+      const res = await request(app.getHttpServer())
+        .get(`/accounts/lookup?accountNumber=${target.accountNumber}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+
+      expect(res.body).toEqual({
+        id: 'acc-2',
+        accountNumber: target.accountNumber,
+        accountType: 'BASIC',
+      });
+    });
+
+    it('la respuesta nunca incluye balance, documentNumber, email ni status (campos ausentes, no solo correctos)', async () => {
+      const token = await loginAndGetToken(client1.email);
+      const target = accountRows.find((r) => r.id === 'acc-2')!;
+
+      const res = await request(app.getHttpServer())
+        .get(`/accounts/lookup?accountNumber=${target.accountNumber}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+
+      expect(res.body).not.toHaveProperty('balance');
+      expect(res.body).not.toHaveProperty('documentNumber');
+      expect(res.body).not.toHaveProperty('email');
+      expect(res.body).not.toHaveProperty('status');
+      expect(Object.keys(res.body).sort()).toEqual(['accountNumber', 'accountType', 'id']);
+    });
+
+    it('funciona para un ADMIN también (cualquier rol autenticado)', async () => {
+      const token = await loginAndGetToken(admin.email);
+      const target = accountRows.find((r) => r.id === 'acc-1')!;
+
+      const res = await request(app.getHttpServer())
+        .get(`/accounts/lookup?accountNumber=${target.accountNumber}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+
+      expect(res.body.id).toBe('acc-1');
+    });
+
+    it('devuelve 404 si el accountNumber no existe', async () => {
+      const token = await loginAndGetToken(client1.email);
+      await request(app.getHttpServer())
+        .get('/accounts/lookup?accountNumber=0000000000')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(404);
+    });
+
+    it('devuelve 400 si accountNumber no viene', async () => {
+      const token = await loginAndGetToken(client1.email);
+      await request(app.getHttpServer())
+        .get('/accounts/lookup')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(400);
+    });
+
+    it('devuelve 400 si accountNumber viene vacío', async () => {
+      const token = await loginAndGetToken(client1.email);
+      await request(app.getHttpServer())
+        .get('/accounts/lookup?accountNumber=')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(400);
+    });
+
+    it('devuelve 401 sin token', async () => {
+      await request(app.getHttpServer()).get('/accounts/lookup?accountNumber=1000000001').expect(401);
     });
   });
 });

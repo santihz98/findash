@@ -37,6 +37,7 @@ describe('CreateTransferUseCase', () => {
       findById: jest.fn(),
       updateBalance: jest.fn(),
       findByIdForUpdate: jest.fn(),
+      findByAccountNumber: jest.fn(),
     };
     // runInTransaction real (no mock trivial): así se ejercita el mismo
     // flujo async que corre en producción, con un `trx` opaco cualquiera.
