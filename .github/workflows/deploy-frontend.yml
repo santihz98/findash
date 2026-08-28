@@ -1,0 +1,135 @@
+# Pipeline de CI/CD para el frontend de FinDash — Angular servido como
+# sitio estático desde S3 (findash-frontend-7874505, us-east-2, sin
+# CloudFront — ver PROGRESS.md Sesión 10).
+#
+# Workflow separado de deploy.yml (backend) a propósito, con su propio
+# filtro de paths (ver PROGRESS.md Sesión 11: el mismo criterio que ya
+# acota deploy.yml a `backend/**` para que un cambio en una mitad del
+# monorepo no dispare el pipeline de la otra). Un push que solo toca
+# `frontend/` NO dispara deploy.yml, y viceversa.
+#
+# Flujo: install -> test (gate de cobertura real, unit-test builder con
+# Vitest) -> build de producción (`ng build`) -> `aws s3 sync --delete`
+# contra el bucket ya provisionado por s3-frontend-setup.sh.
+#
+# Sin step de "invalidar CDN" — no hay CloudFront delante del bucket
+# (trade-off deliberado documentado en s3-frontend-setup.sh: HTTP simple
+# en ambos extremos, evita el costo de ALB+ACM+DNS para esta demo).
+#
+# CRÍTICO — `assets/config.json` está EXCLUIDO explícitamente del `aws s3
+# sync` (ver el step de deploy más abajo): `ng build` sí lo copia al
+# `dist/` local (es un asset más para el bundler), pero ese archivo en el
+# repo trae el valor de DESARROLLO (`http://localhost:3000`, ver
+# frontend/public/assets/config.json). Si el sync lo subiera tal cual,
+# CADA deploy de frontend pisaría silenciosamente la URL real de
+# producción en S3 con `localhost:3000` y rompería el sitio en vivo. El
+# config.json que vive en el bucket se administra por separado, a mano,
+# vía `aws s3 cp` (ver README.md, sección "Frontend") — este pipeline
+# nunca lo toca, ni para subirlo ni para borrarlo (`--exclude` también
+# protege contra el `--delete`).
+#
+# Autenticación a AWS vía OIDC (mismo rol que el backend,
+# findash-github-actions-deploy) — nunca access keys de larga duración.
+# Ese rol hoy NO tiene permisos de S3 (solo ECR + App Runner + el inline
+# de ECS agregado en la Sesión 9.5) — falta agregar una policy inline
+# nueva para que el step de `aws s3 sync` no falle con AccessDenied. Ver
+# PROGRESS.md, sesión de esta bitácora, para el comando exacto (mismo
+# patrón que el resto de la infraestructura de este proyecto: se
+# documenta el comando, no se corre desde una sesión de Claude Code).
+#
+# Secretos que este workflow necesita (mismos ya configurados para
+# deploy.yml, Settings > Secrets and variables > Actions):
+#   AWS_DEPLOY_ROLE_ARN  arn:aws:iam::683342010199:role/findash-github-actions-deploy
+#   AWS_REGION            us-east-2
+# Uno nuevo, específico de este workflow:
+#   S3_FRONTEND_BUCKET    findash-frontend-7874505
+
+name: Deploy Frontend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/deploy-frontend.yml'
+
+# Mismo criterio de mínimo privilegio que deploy.yml (ver ese archivo):
+# `id-token: write` no va a nivel de workflow completo — solo el job que
+# corre `aws-actions/configure-aws-credentials` lo necesita.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (unit, gate de cobertura real)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `ng test` corre con --no-watch en CI por defecto (el builder detecta
+      # el entorno no-TTY) y aplica el gate de cobertura de angular.json
+      # (coverageThresholds: 80% statements/branches/functions/lines) — el
+      # build falla si no se cumple, mismo criterio que `test:cov` en el
+      # backend (deploy.yml, Sesión 8).
+      - name: Tests con cobertura (gate real)
+        run: npx ng test --no-watch
+
+  build-and-deploy:
+    name: Build + deploy a S3
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Build de producción — `ng build` sin argumentos usa la
+      # configuration `production` (default de angular.json). Salida real
+      # verificada en local: frontend/dist/frontend/browser/ (el
+      # subdirectorio `browser/` es el output del builder de aplicación
+      # de Angular 21, no `dist/frontend/` a secas).
+      - name: Build de producción
+        run: npx ng build
+
+      - name: Configurar credenciales de AWS (OIDC, sin access keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # --delete: el bucket queda espejado exactamente al build actual —
+      # un archivo que existía en un build viejo y ya no se genera (ej. un
+      # chunk con hash distinto tras un cambio) no queda huérfano
+      # ocupando espacio ni sirviéndose por accidente. --exclude protege
+      # a `assets/config.json` de ese --delete y de subirse con el valor
+      # de desarrollo (ver el comentario largo al inicio del archivo).
+      - name: Deploy a S3 (sync --delete, sin tocar config.json)
+        run: |
+          aws s3 sync dist/frontend/browser/ "s3://${{ secrets.S3_FRONTEND_BUCKET }}/" \
+            --delete \
+            --exclude "assets/config.json"

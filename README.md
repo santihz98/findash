@@ -4,15 +4,17 @@ Monorepo del proyecto FinDash — billetera digital con backend NestJS (arquitec
 
 ```
 .
-├── backend/                       # NestJS + Prisma (arquitectura hexagonal)
-├── frontend/                      # Angular (vacío, se inicializa en una sesión futura)
-├── docker-compose.yml             # Postgres + backend para desarrollo local
-├── .github/workflows/deploy.yml   # CI/CD activo: test → build → push a ECR (AWS ECS Fargate)
-├── aws-setup.sh                   # Setup inicial de AWS (ECR, RDS, Secrets Manager, rol OIDC) — ya corrido
-├── apprunner-roles-setup.sh       # Roles de App Runner (Access/Instance) — creados, sin uso (ver "Checklist de AWS" abajo)
-├── ecs-setup.sh                   # Cluster/servicio ECS Fargate (reemplaza a App Runner) — ya corrido
-├── validate-production.sh         # Validación end-to-end contra producción (ver "Checklist de AWS" abajo)
-└── infra/gcp/cloudbuild.yaml.bak  # Pipeline original de GCP — no usado, reemplazado por AWS
+├── backend/                                # NestJS + Prisma (arquitectura hexagonal)
+├── frontend/                               # Angular (standalone, NgRx) — ver sección "Frontend" abajo
+├── docker-compose.yml                      # Postgres + backend para desarrollo local
+├── .github/workflows/deploy.yml            # CI/CD backend: test → build → push a ECR → redeploy ECS
+├── .github/workflows/deploy-frontend.yml   # CI/CD frontend: test → build → aws s3 sync
+├── aws-setup.sh                            # Setup inicial de AWS (ECR, RDS, Secrets Manager, rol OIDC) — ya corrido
+├── apprunner-roles-setup.sh                # Roles de App Runner (Access/Instance) — creados, sin uso (ver "Checklist de AWS" abajo)
+├── ecs-setup.sh                            # Cluster/servicio ECS Fargate (reemplaza a App Runner) — ya corrido
+├── s3-frontend-setup.sh                    # Bucket S3 del frontend (static website hosting) — ya corrido
+├── validate-production.sh                  # Validación end-to-end contra producción (ver "Checklist de AWS" abajo)
+└── infra/gcp/cloudbuild.yaml.bak           # Pipeline original de GCP — no usado, reemplazado por AWS
 ```
 
 ---
@@ -31,7 +33,7 @@ Monorepo del proyecto FinDash — billetera digital con backend NestJS (arquitec
 - **Concurrencia sin condiciones de carrera**: los balances se bloquean con `SELECT ... FOR UPDATE` en un orden determinístico (por id, no por rol origen/destino), lo que evita tanto el double-spend como deadlocks entre transferencias cruzadas simultáneas.
 - **Timeout de anti-fraude**: cada transferencia consulta un servicio anti-fraude simulado vía `Promise.race` contra un límite de 3 segundos — si no responde a tiempo, la operación se rechaza sin efectos secundarios (nada se debita ni acredita).
 
-**Stack:** backend NestJS 11 + TypeScript + Prisma + PostgreSQL; frontend Angular (en desarrollo); Docker para desarrollo local; en producción, AWS (ECS Fargate + RDS + ECR + Secrets Manager), con CI/CD en GitHub Actions autenticado vía OIDC (sin credenciales de larga duración).
+**Stack:** backend NestJS 11 + TypeScript + Prisma + PostgreSQL; frontend Angular 21 (standalone) + NgRx, config de backend cargada en runtime (ver sección "Frontend" abajo) — todavía sin features de negocio; Docker para desarrollo local; en producción, AWS (ECS Fargate + RDS + ECR + Secrets Manager + S3 para el frontend), con CI/CD en GitHub Actions autenticado vía OIDC (sin credenciales de larga duración).
 
 **Testing:** cobertura de código con umbral mínimo del 80% (statements/branches/functions/lines), verificado como gate real en el pipeline de CI, no solo en local. Incluye tests de integración contra una base de datos Postgres real (no solo mocks) para los flujos con lógica sensible a condiciones de carrera (transferencias concurrentes, idempotencia).
 
@@ -186,6 +188,54 @@ curl -s -w "\n%{http_code}\n" -X POST http://localhost:3000/transactions/transfe
 
 ---
 
+## Frontend
+
+Angular 21 (standalone components, sin NgModules), NgRx (`@ngrx/store` + `@ngrx/effects` + `@ngrx/store-devtools`), Vitest como test runner (default del builder `@angular/build:unit-test` de esta versión de Angular).
+
+### Correr en local
+
+```bash
+cd frontend
+npm install
+ng serve
+# → http://localhost:4200
+```
+
+`src/app/core/config/config.json` en el bucket de S3 no se toca al correr en local — `ng serve` sirve directamente `frontend/public/assets/config.json` (valor de desarrollo, `{"apiUrl": "http://localhost:3000"}`), así que apunta al backend corriendo en Docker/`start:dev` sin ningún paso extra. `CORS_ORIGIN` del backend ya incluye `http://localhost:4200` (ver "Checklist de AWS", sección 5), así que también podés apuntar el frontend local contra el backend real de AWS con solo cambiar ese archivo.
+
+### Config en runtime (por qué no es un `environment.ts`)
+
+La URL del backend **no** vive en un archivo que el bundler compile (`environment.ts`, `environment.prod.ts`). La tarea ECS Fargate no tiene Load Balancer (trade-off deliberado, ver `ecs-setup.sh`), así que su IP pública puede cambiar en cualquier redeploy — si la URL viviera hardcodeada en un archivo compilado, cada cambio de IP forzaría recompilar y resubir todo el frontend solo para actualizar un string.
+
+En cambio, la URL vive en `frontend/public/assets/config.json` — un archivo estático, servido tal cual (sin pasar por el bundler), que Angular carga en runtime **antes** de que cualquier componente arranque:
+
+- `ConfigService` (`frontend/src/app/core/config/config.service.ts`) hace `fetch('assets/config.json')` — `fetch` nativo, no `HttpClient`, para evitar una dependencia circular con el interceptor de abajo (que necesita la config ya cargada para poder funcionar).
+- `provideAppConfigInitializer()` (`config.initializer.ts`) registra esa carga vía `provideAppInitializer` — el equivalente moderno de `APP_INITIALIZER` para standalone apps (Angular 19+). Angular bloquea el bootstrap hasta que la promesa resuelve: **no existe forma de que un componente arranque sin la config ya cargada**.
+- `apiConfigInterceptor` (`core/interceptors/api-config.interceptor.ts`) reescribe cada request HTTP relativa (ej. `auth/login`) a una URL absoluta contra `ConfigService.apiUrl` — así ningún servicio individual hardcodea la URL del backend.
+
+**Cambiar la URL del backend en producción sin recompilar el frontend** (por ejemplo, después de un redeploy de ECS que le asignó una IP pública nueva):
+
+```bash
+echo '{"apiUrl": "http://<IP_PUBLICA_NUEVA>:3000"}' > /tmp/config.json
+aws s3 cp /tmp/config.json s3://findash-frontend-7874505/assets/config.json \
+  --content-type application/json \
+  --region us-east-2
+```
+
+Sin rebuild, sin redeploy del pipeline — el próximo `fetch` (el siguiente refresh de cualquier usuario) ya ve la IP nueva. **El pipeline de CI/CD (`deploy-frontend.yml`) nunca toca este archivo** (excluido explícitamente del `aws s3 sync`, ver el workflow) — si lo tocara, cada deploy de una feature nueva pisaría silenciosamente la URL real de producción con el valor de desarrollo que vive en el repo.
+
+### Estructura
+
+```
+frontend/src/app/
+├── core/            # ConfigService, apiConfigInterceptor, guards (a futuro)
+├── state/           # NgRx: store raíz vacío hoy, un folder por feature a futuro (auth/, accounts/, ...)
+├── features/        # Páginas (home/ hoy — placeholder de "/")
+└── shared/          # Componentes/directivas reutilizables (vacío hoy)
+```
+
+---
+
 ## Checklist de AWS (pasos manuales, ya ejecutados — deploy validado en producción)
 
 **Pivot de GCP a AWS:** la cuenta de facturación de GCP quedó bloqueada por el error `OR-CBAT-23`, sin resolución posible desde este lado. El checklist de GCP original (Cloud Run + Cloud SQL + Artifact Registry + Cloud Build) y su pipeline quedan documentados sin borrar en [infra/gcp/cloudbuild.yaml.bak](./infra/gcp/cloudbuild.yaml.bak) — es evidencia real de trabajo hecho y de una decisión de arquitectura tomada bajo una restricción externa, no técnica.
@@ -194,7 +244,7 @@ curl -s -w "\n%{http_code}\n" -X POST http://localhost:3000/transactions/transfe
 
 Todos los scripts de esta sección ya corrieron manualmente contra la cuenta de AWS real (`683342010199`, `us-east-2`) — los recursos de abajo ya existen y el backend está sirviendo tráfico real en producción.
 
-**Trigger del pipeline acotado por path (monorepo):** este es un monorepo (`backend/` + `frontend/`), y `.github/workflows/deploy.yml` corre tests, build, push a ECR y redeploy de ECS — nada de eso tiene sentido para un cambio que solo toca el frontend. El trigger (`on.push`) tiene un filtro `paths: ['backend/**', '.github/workflows/deploy.yml']`: **un push que solo modifica `frontend/` no dispara este pipeline**, evitando minutos de CI desperdiciados y un redeploy (con el cambio de IP pública que eso implica) sin ningún motivo real. El workflow se incluye a sí mismo en el filtro a propósito, para que un ajuste al pipeline también se pruebe corriéndolo. El frontend va a tener su propio workflow separado (`deploy-frontend.yml`, **pendiente** — se crea cuando se aborde esa parte del proyecto) con su propio filtro `paths: ['frontend/**']` y su propio job de `aws s3 sync` contra el bucket `findash-frontend-7874505`.
+**Trigger del pipeline acotado por path (monorepo):** este es un monorepo (`backend/` + `frontend/`), y `.github/workflows/deploy.yml` corre tests, build, push a ECR y redeploy de ECS — nada de eso tiene sentido para un cambio que solo toca el frontend. El trigger (`on.push`) tiene un filtro `paths: ['backend/**', '.github/workflows/deploy.yml']`: **un push que solo modifica `frontend/` no dispara este pipeline**, evitando minutos de CI desperdiciados y un redeploy (con el cambio de IP pública que eso implica) sin ningún motivo real. El workflow se incluye a sí mismo en el filtro a propósito, para que un ajuste al pipeline también se pruebe corriéndolo. El frontend tiene su propio workflow separado ([.github/workflows/deploy-frontend.yml](./.github/workflows/deploy-frontend.yml)) con su propio filtro `paths: ['frontend/**', '.github/workflows/deploy-frontend.yml']` y su propio job de `aws s3 sync` contra el bucket `findash-frontend-7874505` — un push que solo toca `backend/` no lo dispara, y viceversa.
 
 ### Recursos ya aprovisionados y en uso
 
@@ -281,6 +331,48 @@ CORS_ORIGIN=http://localhost:4200,http://findash-frontend-7874505.s3-website.us-
 
 `ecs-setup.sh` ya incluye `CORS_ORIGIN` con este valor en la sección `environment` de la task definition (no `secrets` — es una URL pública, no información sensible). **Pendiente como paso manual:** la task definition ya desplegada en producción se registró *antes* de este cambio, así que no tiene `CORS_ORIGIN` todavía — hace falta un `aws ecs register-task-definition` (con la definición actualizada de `ecs-setup.sh`) seguido de `aws ecs update-service --cluster findash-cluster --service findash-backend-service --force-new-deployment --region us-east-2` para que el backend en producción reciba la variable. El redeploy automático de un push normal (Sesión 9.5) no alcanza acá porque no cambia la task definition, solo la imagen.
 
+### 6. Permiso IAM pendiente para `deploy-frontend.yml` (S3)
+
+El rol `findash-github-actions-deploy` (el mismo que usa `deploy.yml` para el backend, vía OIDC) hoy **no tiene ningún permiso de S3** — confirmado con `aws iam list-attached-role-policies` + `aws iam list-role-policies`: solo `AmazonEC2ContainerRegistryPowerUser`, `AWSAppRunnerFullAccess`, y la policy inline `findash-ecs-deploy` (ECS, Sesión 9.5). Sin el fix de abajo, el step `aws s3 sync` de `deploy-frontend.yml` va a fallar con `AccessDenied` en el primer push a `frontend/`.
+
+**Policy inline nueva, acotada al bucket del frontend (mismo criterio de mínimo privilegio que `findash-ecs-deploy`, no un `AmazonS3FullAccess`):**
+
+```bash
+cat > /tmp/findash-github-actions-s3-frontend-policy.json << 'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::findash-frontend-7874505"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::findash-frontend-7874505/*"
+    }
+  ]
+}
+EOF
+
+aws iam put-role-policy \
+  --role-name findash-github-actions-deploy \
+  --policy-name findash-s3-frontend-deploy \
+  --policy-document file:///tmp/findash-github-actions-s3-frontend-policy.json \
+  --region us-east-2
+```
+
+(`s3:ListBucket` sobre el bucket porque `aws s3 sync` necesita listar el contenido actual para calcular el diff antes de subir/borrar; `s3:PutObject`/`s3:DeleteObject` sobre los objetos porque `--delete` puede necesitar borrar archivos que ya no existen en el build nuevo.)
+
+También hace falta un secreto nuevo del repositorio (Settings > Secrets and variables > Actions), además de los 2 que `deploy.yml` ya usa (`AWS_DEPLOY_ROLE_ARN`, `AWS_REGION` — se reutilizan tal cual):
+
+```
+S3_FRONTEND_BUCKET = findash-frontend-7874505
+```
+
+**No ejecutado desde esta sesión** — mismo criterio que el resto de los cambios de IAM de este proyecto (ver Sesión 9.5): se documenta el comando exacto, no se corre desde una sesión de Claude Code.
+
 ### Checklist resumido
 
 - [x] `aws-setup.sh` corrido — ECR, RDS, Secrets Manager, rol OIDC de GitHub Actions.
@@ -294,6 +386,10 @@ CORS_ORIGIN=http://localhost:4200,http://findash-frontend-7874505.s3-website.us-
 - [x] `validate-production.sh` corrido contra la IP pública real: 15/15 checks en verde.
 - [x] Push a `main` verificado end-to-end: el redeploy automático reemplaza la tarea de ECS con la imagen nueva sin intervención manual.
 - [ ] `CORS_ORIGIN` agregado a `ecs-setup.sh`, pero la task definition en producción todavía no se actualizó — falta `register-task-definition` + `update-service --force-new-deployment` manual (ver sección 5 arriba).
+- [x] `s3-frontend-setup.sh` corrido — bucket `findash-frontend-7874505` (static website hosting, solo-lectura pública) ya existe.
+- [x] `deploy-frontend.yml` creado (test → build → `aws s3 sync`, filtro `paths: ['frontend/**']`).
+- [ ] Policy inline `findash-s3-frontend-deploy` aplicada al rol `findash-github-actions-deploy` — falta el `put-role-policy` manual (ver sección 6 arriba), sin esto el primer push a `frontend/` va a fallar con `AccessDenied`.
+- [ ] Secreto `S3_FRONTEND_BUCKET` agregado al repositorio de GitHub (ver sección 6 arriba).
 
 ---
 
