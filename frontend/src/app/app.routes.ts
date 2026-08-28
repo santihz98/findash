@@ -8,10 +8,10 @@ import { roleGuard } from './core/guards/role.guard';
 // disponible en core/guards/ para una futura ruta que solo necesite "estar
 // logueado", sin importar el rol.
 export const routes: Routes = [
-  {
-    path: '',
-    loadComponent: () => import('./features/home/containers/home.page').then((m) => m.HomePage),
-  },
+  // Sin landing page propia: al arrancar el front (o al visitar '/' sin
+  // sesión), se va directo a /login — no hay ningún caso de uso para un
+  // visitante anónimo que no sea loguearse.
+  { path: '', pathMatch: 'full', redirectTo: 'login' },
   {
     path: 'login',
     loadComponent: () => import('./features/auth/login.page').then((m) => m.LoginPage),

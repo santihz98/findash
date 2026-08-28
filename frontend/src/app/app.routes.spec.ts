@@ -20,7 +20,7 @@ const adminUser: CurrentUser = {
 const clientUser: CurrentUser = { ...adminUser, id: 'user-2', role: 'CLIENT' };
 
 describe('routes', () => {
-  it('lazy-loads HomePage on the root path', async () => {
+  it('redirects the root path straight to /login (sin landing page)', async () => {
     TestBed.configureTestingModule({
       providers: [
         provideRouter(routes),
@@ -30,9 +30,8 @@ describe('routes', () => {
 
     const harness = await RouterTestingHarness.create('/');
 
-    expect(harness.routeNativeElement?.querySelector('h1')?.textContent).toContain(
-      'FinDash — en construcción',
-    );
+    expect(TestBed.inject(Router).url).toBe('/login');
+    expect(harness.routeNativeElement?.querySelector('form')).toBeTruthy();
   });
 
   it('lazy-loads LoginPage on /login', async () => {
