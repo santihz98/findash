@@ -194,6 +194,8 @@ curl -s -w "\n%{http_code}\n" -X POST http://localhost:3000/transactions/transfe
 
 Todos los scripts de esta sección ya corrieron manualmente contra la cuenta de AWS real (`683342010199`, `us-east-2`) — los recursos de abajo ya existen y el backend está sirviendo tráfico real en producción.
 
+**Trigger del pipeline acotado por path (monorepo):** este es un monorepo (`backend/` + `frontend/`), y `.github/workflows/deploy.yml` corre tests, build, push a ECR y redeploy de ECS — nada de eso tiene sentido para un cambio que solo toca el frontend. El trigger (`on.push`) tiene un filtro `paths: ['backend/**', '.github/workflows/deploy.yml']`: **un push que solo modifica `frontend/` no dispara este pipeline**, evitando minutos de CI desperdiciados y un redeploy (con el cambio de IP pública que eso implica) sin ningún motivo real. El workflow se incluye a sí mismo en el filtro a propósito, para que un ajuste al pipeline también se pruebe corriéndolo. El frontend va a tener su propio workflow separado (`deploy-frontend.yml`, **pendiente** — se crea cuando se aborde esa parte del proyecto) con su propio filtro `paths: ['frontend/**']` y su propio job de `aws s3 sync` contra el bucket `findash-frontend-7874505`.
+
 ### Recursos ya aprovisionados y en uso
 
 | Recurso | Valor |
@@ -267,6 +269,18 @@ curl http://<IP_PUBLICA>:3000/health
 
 `./validate-production.sh <IP_PUBLICA>` corre 15 checks reales contra el backend en producción: health check, Swagger, login de los 4 usuarios del seed, RBAC (`/accounts`, `/dashboard/kpis` — 200 para ADMIN, 403 para CLIENT), el header `X-Idempotency-Key` obligatorio, una transferencia real con verificación de que reenviar la misma key no la duplica, y los KPIs del dashboard. El check de la transferencia reintenta hasta 8 veces con keys nuevas por el timeout probabilístico de RN-02 (~78% de los intentos individuales caen en 504 por diseño, no es un fallo del script). Termina con `PASS`/`FAIL` por check y código de salida no-cero si algo falló.
 
+### 5. CORS — habilitar el frontend (S3) sin bloquear el desarrollo local
+
+El backend requiere `CORS_ORIGIN` para arrancar (`ConfigService.getOrThrow`, sin fallback — mismo criterio que `JWT_SECRET`/`JWT_REFRESH_SECRET`, ver `backend/src/shared/config/cors.config.ts`). Es una lista de orígenes separados por coma. El valor real de producción:
+
+```
+CORS_ORIGIN=http://localhost:4200,http://findash-frontend-7874505.s3-website.us-east-2.amazonaws.com
+```
+
+`http://localhost:4200` se mantiene también en producción, no solo en desarrollo — permite correr el frontend en local (`ng serve`) contra el backend real de AWS sin bloqueos de CORS, útil durante todo el desarrollo del frontend. El frontend se sirve como sitio estático desde S3 (bucket `findash-frontend-7874505`, sin CloudFront ni dominio propio — HTTP en ambos extremos, evita mixed-content sin la complejidad de ALB+ACM+DNS).
+
+`ecs-setup.sh` ya incluye `CORS_ORIGIN` con este valor en la sección `environment` de la task definition (no `secrets` — es una URL pública, no información sensible). **Pendiente como paso manual:** la task definition ya desplegada en producción se registró *antes* de este cambio, así que no tiene `CORS_ORIGIN` todavía — hace falta un `aws ecs register-task-definition` (con la definición actualizada de `ecs-setup.sh`) seguido de `aws ecs update-service --cluster findash-cluster --service findash-backend-service --force-new-deployment --region us-east-2` para que el backend en producción reciba la variable. El redeploy automático de un push normal (Sesión 9.5) no alcanza acá porque no cambia la task definition, solo la imagen.
+
 ### Checklist resumido
 
 - [x] `aws-setup.sh` corrido — ECR, RDS, Secrets Manager, rol OIDC de GitHub Actions.
@@ -279,6 +293,7 @@ curl http://<IP_PUBLICA>:3000/health
 - [x] Permiso IAM `ecs:UpdateService`/`ecs:DescribeServices` aplicado al rol `findash-github-actions-deploy`.
 - [x] `validate-production.sh` corrido contra la IP pública real: 15/15 checks en verde.
 - [x] Push a `main` verificado end-to-end: el redeploy automático reemplaza la tarea de ECS con la imagen nueva sin intervención manual.
+- [ ] `CORS_ORIGIN` agregado a `ecs-setup.sh`, pero la task definition en producción todavía no se actualizó — falta `register-task-definition` + `update-service --force-new-deployment` manual (ver sección 5 arriba).
 
 ---
 

@@ -45,6 +45,9 @@ name: Deploy
 on:
   push:
     branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/deploy.yml'
 
 # Nota: `id-token: write` NO va acá a nivel de workflow completo — el job
 # `test` no llama a ninguna acción de AWS y no necesita ese permiso; sería
