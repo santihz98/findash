@@ -9,10 +9,10 @@ import { selectCurrentUser } from '../state/auth/auth.reducer';
  * Layout de la app autenticada (Sesión 16): header con identidad del
  * usuario logueado (email + rol) y logout siempre visible, envolviendo un
  * `<router-outlet>` propio — `/accounts`/`/transfer`/`/transfer/history`/
- * `/transactions` viven como hijos de este layout en app.routes.ts, así
- * que heredan el header sin que cada página tenga que reimplementarlo. `/`
- * y `/login` quedan fuera a propósito: son pantallas no autenticadas, no
- * tiene sentido mostrar "cerrar sesión" ahí.
+ * `/transactions`/`/dashboard` viven como hijos de este layout en
+ * app.routes.ts, así que heredan el header sin que cada página tenga que
+ * reimplementarlo. `/` y `/login` quedan fuera a propósito: son pantallas
+ * no autenticadas, no tiene sentido mostrar "cerrar sesión" ahí.
  *
  * Nav por rol (Sesión 18 del frontend, RF-02): hasta esta sesión cada rol
  * tenía una única ruta autenticada, así que el guard alcanzaba para
@@ -44,6 +44,7 @@ import { selectCurrentUser } from '../state/auth/auth.reducer';
               @if (u.role === 'ADMIN') {
                 <a routerLink="/accounts" routerLinkActive="is-active">Cuentas</a>
                 <a routerLink="/transactions" routerLinkActive="is-active">Auditoría</a>
+                <a routerLink="/dashboard" routerLinkActive="is-active">Dashboard</a>
               }
             </nav>
           }

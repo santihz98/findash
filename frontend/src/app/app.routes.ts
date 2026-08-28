@@ -62,6 +62,17 @@ export const routes: Routes = [
             (m) => m.TransactionsAuditPage,
           ),
       },
+      // RF-07/RF-08 (Sesión 22 del frontend) — KPIs + volumen por tipo de
+      // cuenta, ADMIN. `loadComponent` (RNF-04): este chunk, y todo lo que
+      // importa (NgRx del feature, KpiCardsComponent, VolumeChartComponent
+      // — con Chart.js adentro, diferido un nivel más con @defer dentro
+      // del propio `dashboard.page.ts`), queda fuera del bundle inicial.
+      {
+        path: 'dashboard',
+        canActivate: [roleGuard(['ADMIN'])],
+        loadComponent: () =>
+          import('./features/dashboard/containers/dashboard.page').then((m) => m.DashboardPage),
+      },
     ],
   },
 ];

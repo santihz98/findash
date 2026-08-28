@@ -15,6 +15,8 @@ import { AccountsEffects } from './state/accounts/accounts.effects';
 import { accountsFeature } from './state/accounts/accounts.reducer';
 import { AuthEffects } from './state/auth/auth.effects';
 import { authFeature } from './state/auth/auth.reducer';
+import { DashboardEffects } from './state/dashboard/dashboard.effects';
+import { dashboardFeature } from './state/dashboard/dashboard.reducer';
 import { MyAccountEffects } from './state/myAccount/my-account.effects';
 import { myAccountFeature } from './state/myAccount/my-account.reducer';
 import { MyTransactionsEffects } from './state/myTransactions/my-transactions.effects';
@@ -44,6 +46,7 @@ export const appConfig: ApplicationConfig = {
     provideState(myTransactionsFeature),
     provideState(transactionsAuditFeature),
     provideState(accountLookupFeature),
+    provideState(dashboardFeature),
     provideEffects([
       AuthEffects,
       AccountsEffects,
@@ -52,6 +55,7 @@ export const appConfig: ApplicationConfig = {
       MyTransactionsEffects,
       TransactionsAuditEffects,
       AccountLookupEffects,
+      DashboardEffects,
     ]),
     provideStoreDevtools({ maxAge: 25, logOnly: !isDevMode() }),
   ],
