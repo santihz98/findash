@@ -461,26 +461,6 @@ S3_FRONTEND_BUCKET = findash-frontend-7874505
 
 **No ejecutado desde esta sesión** — mismo criterio que el resto de los cambios de IAM de este proyecto (ver Sesión 9.5): se documenta el comando exacto, no se corre desde una sesión de Claude Code.
 
-### Checklist resumido
-
-- [x] `aws-setup.sh` corrido — ECR, RDS, Secrets Manager, rol OIDC de GitHub Actions.
-- [x] `apprunner-roles-setup.sh` corrido — Access Role e Instance Role de App Runner (sin uso, ver el pivot arriba).
-- [x] `ecs-setup.sh` corrido — cluster, task definition y servicio ECS Fargate.
-- [x] 3 secretos configurados en GitHub (Settings > Secrets and variables > Actions).
-- [x] Schema migrado contra la RDS real (`prisma migrate deploy` + `prisma db seed`).
-- [x] Push a `main` → workflow corre, sube la imagen a ECR y redespliega el servicio automáticamente (`force-new-deployment` + `wait services-stable`).
-- [x] Servicio ECS alcanzó steady state (`runningCount: 1`, sin tareas caídas).
-- [x] Permiso IAM `ecs:UpdateService`/`ecs:DescribeServices` aplicado al rol `findash-github-actions-deploy`.
-- [x] `validate-production.sh` corrido contra la IP pública real: 15/15 checks en verde.
-- [x] Push a `main` verificado end-to-end: el redeploy automático reemplaza la tarea de ECS con la imagen nueva sin intervención manual.
-- [ ] `CORS_ORIGIN` agregado a `ecs-setup.sh`, pero la task definition en producción todavía no se actualizó — falta `register-task-definition` + `update-service --force-new-deployment` manual (ver sección 5 arriba).
-- [x] `s3-frontend-setup.sh` corrido — bucket `findash-frontend-7874505` (static website hosting, solo-lectura pública) ya existe.
-- [x] `deploy-frontend.yml` creado (test → build → `aws s3 sync`, filtro `paths: ['frontend/**']`).
-- [ ] Policy inline `findash-s3-frontend-deploy` aplicada al rol `findash-github-actions-deploy` — falta el `put-role-policy` manual (ver sección 6 arriba), sin esto el primer push a `frontend/` va a fallar con `AccessDenied`.
-- [ ] Secreto `S3_FRONTEND_BUCKET` agregado al repositorio de GitHub (ver sección 6 arriba).
-
----
-
 ## Conexión ECS Fargate ↔ RDS
 
 Mismo criterio que tenía documentado App Runner: como la instancia de RDS se creó públicamente accesible (trade-off deliberado de `aws-setup.sh`, ver el comentario en ese script), la tarea de ECS se conecta por **TCP normal con TLS**, exactamente el mismo tipo de conexión que Prisma ya usa en local — solo cambia el host y `sslmode`. El pivot de App Runner a ECS Fargate no cambió nada acá: ambos son simplemente cómputo containerizado hablándole a la misma RDS por la misma red pública.
