@@ -38,6 +38,13 @@ const row = {
   authorizationCode: 'AUTHCODE1',
   status: 'REJECTED',
   createdAt: '2026-08-27T16:05:41.540Z',
+  originAccount: {
+    accountNumber: '1000000001',
+    accountType: 'BASIC',
+    ownerEmail: 'basic@findash.dev',
+    ownerDocumentNumber: '1010000002',
+  },
+  destAccount: null,
 };
 
 /**
@@ -104,6 +111,10 @@ describe('transactions audit flow (integración real, backend fake)', () => {
     expect(harness.routeNativeElement?.textContent).toContain('Página 2 de 2');
     // Vista de auditoría: sin columna de dirección (no scopeada a ninguna cuenta).
     expect(harness.routeDebugElement!.query(By.css('.direction-badge'))).toBeFalsy();
+    // Sesión 27: la fila real muestra accountNumber/accountType y el email del titular (dato ya disponible para el ADMIN vía GET /accounts).
+    expect(harness.routeNativeElement?.textContent).toContain('1000000001');
+    expect(harness.routeNativeElement?.textContent).toContain('BASIC');
+    expect(harness.routeNativeElement?.textContent).toContain('basic@findash.dev');
   });
 
   it('changing a filter resets to page 1 and updates the URL + request', async () => {

@@ -1,17 +1,39 @@
 /**
  * Contrato real de GET /transactions (verificado contra /api/docs-json del
- * backend desplegado y contra un curl real con el token de
- * admin@findash.dev). A diferencia de `MyTransaction`
+ * backend desplegado — reconstruido localmente y re-verificado en la
+ * Sesión 27 tras el enriquecimiento de la Sesión 26 — y contra un curl real
+ * con el token de admin@findash.dev). A diferencia de `MyTransaction`
  * (`state/myTransactions/`), no trae `direction` — no está scopeado a
  * ninguna cuenta, es la vista de auditoría completa de la plataforma.
  *
- * `TransactionStatus` duplicado a propósito respecto a
- * `state/myTransactions/my-transactions.model.ts` — ver el comentario en
- * ese archivo para la justificación (mismo criterio que el backend usó
- * para `PaginationQueryDto` en su Sesión 17: no acoplar dos features por
- * un alias de 3 valores).
+ * `originAccount` (SIEMPRE presente, `originAccountId` es NOT NULL) y
+ * `destAccount` (`null` en el mismo criterio ya establecido desde la
+ * Sesión 6.5 para filas REJECTED/FAILED sin destino confirmado), cada uno
+ * con `accountNumber`/`accountType` Y los datos del titular
+ * (`ownerEmail`/`ownerDocumentNumber`) — el ADMIN ya tiene acceso a esos
+ * mismos datos vía `GET /accounts`, esto solo los une en un solo request.
+ * `TransactionAccountInfoWithOwner` es DISTINTO del `TransactionAccountInfo`
+ * que usa `state/myTransactions/` (sin titular) — objeto anidado por
+ * cuenta, no campos sueltos con prefijo (ver PROGRESS.md Sesión 26).
+ *
+ * `TransactionStatus`/`TransactionAccountInfo*` duplicados a propósito
+ * respecto a `state/myTransactions/my-transactions.model.ts` — ver el
+ * comentario en ese archivo para la justificación (mismo criterio que el
+ * backend usó para `PaginationQueryDto` en su Sesión 17: no acoplar dos
+ * features por un puñado de valores compartidos).
  */
 export type TransactionStatus = 'COMPLETED' | 'REJECTED' | 'FAILED';
+export type AccountType = 'BASIC' | 'PREMIUM' | 'CORPORATE';
+
+export interface TransactionAccountInfo {
+  accountNumber: string;
+  accountType: AccountType;
+}
+
+export interface TransactionAccountInfoWithOwner extends TransactionAccountInfo {
+  ownerEmail: string;
+  ownerDocumentNumber: string;
+}
 
 export interface AuditTransaction {
   id: string;
@@ -22,6 +44,8 @@ export interface AuditTransaction {
   authorizationCode: string | null;
   status: TransactionStatus;
   createdAt: string;
+  originAccount: TransactionAccountInfoWithOwner;
+  destAccount: TransactionAccountInfoWithOwner | null;
 }
 
 export interface ListTransactionsAuditQuery {

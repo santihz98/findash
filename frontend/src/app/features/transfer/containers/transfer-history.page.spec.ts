@@ -19,6 +19,7 @@ const transaction: MyTransaction = {
   status: 'COMPLETED',
   createdAt: '2026-08-28T00:00:00.000Z',
   direction: 'SENT',
+  counterpartyAccount: { accountNumber: '1000000002', accountType: 'PREMIUM' },
 };
 
 function create(queryParams: Record<string, string> = {}, autoDetect = true) {

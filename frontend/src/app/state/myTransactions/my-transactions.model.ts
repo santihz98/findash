@@ -1,23 +1,40 @@
 /**
  * Contrato real de GET /transactions/me (verificado contra /api/docs-json
- * del backend desplegado y contra un curl real con el token de
- * basic@findash.dev — mismo criterio que el resto de los `state/*.model.ts`
- * de este proyecto). `direction` es relativo a la cuenta del usuario
- * autenticado, calculado por el backend, nunca persistido — 'SENT' si la
- * cuenta es el origen, 'RECEIVED' si es el destino. `status` incluye
- * REJECTED/FAILED (no solo COMPLETED): el CLIENT ve también sus intentos
- * fallidos, y en ese caso `destAccountId`/`commission`/`authorizationCode`
- * pueden venir `null` (ver backend, Sesión 6.5).
+ * del backend desplegado — reconstruido localmente y re-verificado en la
+ * Sesión 27 tras el enriquecimiento de la Sesión 26 — y contra un curl real
+ * con el token de basic@findash.dev, mismo criterio que el resto de los
+ * `state/*.model.ts` de este proyecto). `direction` es relativo a la cuenta
+ * del usuario autenticado, calculado por el backend, nunca persistido —
+ * 'SENT' si la cuenta es el origen, 'RECEIVED' si es el destino. `status`
+ * incluye REJECTED/FAILED (no solo COMPLETED): el CLIENT ve también sus
+ * intentos fallidos, y en ese caso `destAccountId`/`commission`/
+ * `authorizationCode` pueden venir `null` (ver backend, Sesión 6.5).
  *
- * `TransactionStatus` se define ACÁ (no en `state/transactionsAudit/`) y no
- * se comparte entre ambos módulos por import — es un alias de 3 strings,
- * duplicarlo es más barato que acoplar dos features que, aparte de este
- * enum, no comparten nada (mismo criterio que el backend usó en su propia
- * Sesión 17 para `PaginationQueryDto`: no cruzar la capa de un módulo hacia
- * la de otro por un puñado de valores).
+ * `counterpartyAccount` (Sesión 26 del backend): la cuenta que NO es la
+ * propia — `accountNumber`/`accountType` únicamente, `null` cuando esa
+ * cuenta no está confirmada (mismo criterio que `destAccountId` desde la
+ * Sesión 6.5). Deliberadamente SIN `ownerEmail`/`ownerDocumentNumber` — un
+ * CLIENT puede saber CON QUÉ TIPO de cuenta operó, nunca QUIÉN es la
+ * persona detrás (mismo criterio de privacidad que `GET /accounts/lookup`,
+ * Sesión 19). `TransactionAccountInfo` es un tipo estructuralmente distinto
+ * del que usa `state/transactionsAudit/` (que sí trae el titular) — nunca
+ * el mismo tipo con campos opcionales que un cambio futuro pudiera
+ * completar por descuido.
+ *
+ * `TransactionStatus`/`TransactionAccountInfo` se definen ACÁ (no en
+ * `state/transactionsAudit/`) y no se comparten entre ambos módulos por
+ * import — mismo criterio que el backend usó en su propia Sesión 17 para
+ * `PaginationQueryDto`: no cruzar la capa de un módulo hacia la de otro por
+ * un puñado de valores compartidos.
  */
 export type TransactionStatus = 'COMPLETED' | 'REJECTED' | 'FAILED';
 export type TransactionDirection = 'SENT' | 'RECEIVED';
+export type AccountType = 'BASIC' | 'PREMIUM' | 'CORPORATE';
+
+export interface TransactionAccountInfo {
+  accountNumber: string;
+  accountType: AccountType;
+}
 
 export interface MyTransaction {
   id: string;
@@ -29,6 +46,7 @@ export interface MyTransaction {
   status: TransactionStatus;
   createdAt: string;
   direction: TransactionDirection;
+  counterpartyAccount: TransactionAccountInfo | null;
 }
 
 export interface ListMyTransactionsQuery {

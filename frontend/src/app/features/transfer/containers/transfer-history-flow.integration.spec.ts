@@ -83,6 +83,7 @@ describe('transfer history flow (integración real, backend fake)', () => {
           status: 'COMPLETED',
           createdAt: '2026-08-27T16:05:41.540Z',
           direction: 'SENT',
+          counterpartyAccount: { accountNumber: '1000000002', accountType: 'PREMIUM' },
         },
         {
           id: 'tx-2',
@@ -94,6 +95,7 @@ describe('transfer history flow (integración real, backend fake)', () => {
           status: 'COMPLETED',
           createdAt: '2026-08-27T10:00:00.000Z',
           direction: 'RECEIVED',
+          counterpartyAccount: { accountNumber: '1000000003', accountType: 'CORPORATE' },
         },
       ],
       page: 1,
@@ -109,6 +111,14 @@ describe('transfer history flow (integración real, backend fake)', () => {
     expect(harness.routeNativeElement?.textContent).toContain('Recibida');
     expect(harness.routeNativeElement?.textContent).toContain('AUTHCODE1');
     expect(harness.routeNativeElement?.textContent).toContain('AUTHCODE2');
+    // Sesión 27: la contraparte se muestra por accountNumber/accountType real, nunca su email
+    // (acotado a la tabla: la barra superior sí muestra el email del propio usuario logueado).
+    const tableText = harness.routeNativeElement?.querySelector('app-transaction-table')?.textContent ?? '';
+    expect(tableText).toContain('1000000002');
+    expect(tableText).toContain('PREMIUM');
+    expect(tableText).toContain('1000000003');
+    expect(tableText).toContain('CORPORATE');
+    expect(tableText).not.toContain('@');
   });
 
   it('shows the 422 NoOriginAccountException message via the same error-banner pattern, without crashing the page', async () => {
@@ -148,6 +158,7 @@ describe('transfer history flow (integración real, backend fake)', () => {
       status: 'COMPLETED',
       createdAt: '2026-08-27T16:05:41.540Z',
       direction: 'SENT',
+      counterpartyAccount: { accountNumber: '1000000002', accountType: 'PREMIUM' },
     };
 
     httpMock

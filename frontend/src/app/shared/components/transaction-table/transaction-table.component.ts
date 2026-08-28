@@ -7,20 +7,48 @@ import { Component, input, output } from '@angular/core';
  * la usan (`MyTransaction`/`AuditTransaction`, Sesión 18 del frontend), y
  * ninguno de los dos es "el dueño" del otro — importar desde cualquiera de
  * los dos acoplaría ese feature al otro sin necesidad. `MyTransaction`
- * (tiene `direction`) y `AuditTransaction` (no la tiene) son ambos
+ * (tiene `direction`/`counterpartyAccount`) y `AuditTransaction` (tiene
+ * `originAccount`/`destAccount` con titular, nunca `direction`) son ambos
  * estructuralmente compatibles con esta interfaz vía typing estructural de
  * TypeScript, sin ningún mapeo explícito en los containers.
+ *
+ * `TransactionAccountInfo`/`TransactionAccountInfoWithOwner` (Sesión 27,
+ * consume el enriquecimiento de la Sesión 26 del backend) duplicados a
+ * propósito respecto a los mismos tipos en `state/myTransactions/`/
+ * `state/transactionsAudit/` — mismo criterio que el resto de este
+ * componente compartido (no importar el shape de un feature específico).
  */
+export interface TransactionAccountInfo {
+  accountNumber: string;
+  accountType: 'BASIC' | 'PREMIUM' | 'CORPORATE';
+}
+
+export interface TransactionAccountInfoWithOwner extends TransactionAccountInfo {
+  ownerEmail: string;
+  ownerDocumentNumber: string;
+}
+
 export interface TransactionRow {
   id: string;
-  originAccountId: string;
-  destAccountId: string | null;
   amount: string;
   commission: string | null;
   authorizationCode: string | null;
   status: 'COMPLETED' | 'REJECTED' | 'FAILED';
   createdAt: string;
   direction?: 'SENT' | 'RECEIVED';
+  /** Vista ADMIN (`showDirection=false`) — SIEMPRE presente (`originAccountId` es NOT NULL en el backend). */
+  originAccount?: TransactionAccountInfoWithOwner;
+  /** Vista ADMIN — `null` cuando el destino no está confirmado (REJECTED/FAILED, mismo criterio desde la Sesión 6.5). */
+  destAccount?: TransactionAccountInfoWithOwner | null;
+  /**
+   * Vista CLIENT (`showDirection=true`) — la cuenta que NO es la propia,
+   * `null` si no está confirmada. Deliberadamente `TransactionAccountInfo`
+   * (SIN `ownerEmail`/`ownerDocumentNumber`), nunca la variante con
+   * titular: el template de esta vista ni siquiera puede intentar leer un
+   * email acá aunque quisiera, el tipo no lo tiene (defensa en
+   * profundidad más allá de lo que ya garantiza el backend).
+   */
+  counterpartyAccount?: TransactionAccountInfo | null;
 }
 
 /**
@@ -39,12 +67,22 @@ export interface TransactionRow {
  * "REJECTED" en tonos similares serían difíciles de distinguir de un
  * vistazo, exactamente lo que este esquema evita.
  *
- * `originAccountId`/`destAccountId` se muestran truncados con el id
- * completo en el `title` (tooltip) — el backend no expone un
- * `accountNumber` legible en este payload (solo el `id` UUID), mismo
- * límite ya documentado en `TransferFormPage` (Sesión 15, "cuenta destino:
- * id crudo") para el mismo motivo: no hay ningún endpoint que resuelva
- * UUID -> número de cuenta para quien consulta.
+ * **Columnas de cuenta (Sesión 27, reemplaza los UUIDs truncados de la
+ * Sesión 18 ahora que el backend enriquece ambos endpoints — Sesión 26):**
+ * `accountNumber` + badge de `accountType` con el MISMO sistema de colores
+ * ya establecido en `AccountTableComponent` (Sesión 16: BASIC gris por
+ * default, PREMIUM `--color-primary`, CORPORATE `--color-info`) — valores
+ * de color duplicados a propósito (cada componente standalone encapsula su
+ * propio CSS, no hay una hoja de estilos compartida de la que importar),
+ * nunca una paleta nueva. Vista ADMIN (`showDirection=false`): columnas
+ * "Origen"/"Destino", cada una con el email del titular (dato ya
+ * disponible en `TransactionAccountInfoWithOwner`). Vista CLIENT
+ * (`showDirection=true`): una única columna "Contraparte" con SOLO
+ * `accountNumber`/`accountType` — el bloque de template de esta rama NUNCA
+ * referencia `ownerEmail` (ni siquiera existe en el tipo
+ * `TransactionAccountInfo` que usa esa rama), defensa en profundidad más
+ * allá de que el backend ya no lo mande (mismo criterio de privacidad que
+ * `GET /accounts/lookup`, Sesión 19).
  */
 @Component({
   selector: 'app-transaction-table',
@@ -57,9 +95,11 @@ export interface TransactionRow {
             <tr>
               @if (showDirection()) {
                 <th scope="col">Dirección</th>
+                <th scope="col">Contraparte</th>
+              } @else {
+                <th scope="col">Origen</th>
+                <th scope="col">Destino</th>
               }
-              <th scope="col">Origen</th>
-              <th scope="col">Destino</th>
               <th scope="col">Monto</th>
               <th scope="col">Comisión</th>
               <th scope="col">Estado</th>
@@ -77,13 +117,45 @@ export interface TransactionRow {
                       {{ t.direction === 'SENT' ? 'Enviada' : 'Recibida' }}
                     </span>
                   </td>
+                  <td>
+                    <!-- CLIENT: nunca lee ownerEmail — TransactionAccountInfo no lo tiene. -->
+                    @if (t.counterpartyAccount; as counterparty) {
+                      <span class="account-cell">
+                        <span class="transaction-table__mono">{{ counterparty.accountNumber }}</span>
+                        <span class="account-type-badge account-type-badge--{{ counterparty.accountType }}">{{
+                          counterparty.accountType
+                        }}</span>
+                      </span>
+                    } @else {
+                      <span>—</span>
+                    }
+                  </td>
+                } @else {
+                  <td>
+                    @if (t.originAccount; as origin) {
+                      <span class="account-cell">
+                        <span class="transaction-table__mono">{{ origin.accountNumber }}</span>
+                        <span class="account-type-badge account-type-badge--{{ origin.accountType }}">{{
+                          origin.accountType
+                        }}</span>
+                        <span class="account-cell__email">{{ origin.ownerEmail }}</span>
+                      </span>
+                    }
+                  </td>
+                  <td>
+                    @if (t.destAccount; as dest) {
+                      <span class="account-cell">
+                        <span class="transaction-table__mono">{{ dest.accountNumber }}</span>
+                        <span class="account-type-badge account-type-badge--{{ dest.accountType }}">{{
+                          dest.accountType
+                        }}</span>
+                        <span class="account-cell__email">{{ dest.ownerEmail }}</span>
+                      </span>
+                    } @else {
+                      <span>—</span>
+                    }
+                  </td>
                 }
-                <td class="transaction-table__mono" [title]="t.originAccountId">
-                  {{ shortId(t.originAccountId) }}
-                </td>
-                <td class="transaction-table__mono" [title]="t.destAccountId ?? ''">
-                  {{ t.destAccountId ? shortId(t.destAccountId) : '—' }}
-                </td>
                 <td class="transaction-table__amount">{{ t.amount }}</td>
                 <td class="transaction-table__amount">{{ t.commission ?? '—' }}</td>
                 <td>
@@ -133,7 +205,7 @@ export interface TransactionRow {
 
     .transaction-table {
       width: 100%;
-      min-width: 48rem;
+      min-width: 56rem;
       border-collapse: collapse;
       transition: opacity 0.15s ease;
     }
@@ -181,6 +253,43 @@ export interface TransactionRow {
     .transaction-table__date {
       color: var(--color-ink-muted);
       white-space: nowrap;
+    }
+
+    .account-cell {
+      display: flex;
+      flex-direction: column;
+      gap: var(--space-1);
+    }
+
+    .account-cell__email {
+      font-size: 0.75rem;
+      color: var(--color-ink-muted);
+    }
+
+    /* Mismo sistema de colores que AccountTableComponent (Sesión 16) — valores duplicados a propósito, sin hoja de estilos compartida entre componentes standalone. */
+    .account-type-badge {
+      display: inline-block;
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      padding: var(--space-1) var(--space-3);
+      border-radius: var(--radius-full);
+      background: var(--color-surface-sunken);
+      color: var(--color-ink-muted);
+      border: 1px solid var(--color-border-strong);
+      width: fit-content;
+    }
+
+    .account-type-badge--PREMIUM {
+      background: var(--color-primary-soft);
+      color: var(--color-primary);
+      border-color: var(--color-primary-soft-border);
+    }
+
+    .account-type-badge--CORPORATE {
+      background: var(--color-info-soft);
+      color: var(--color-info);
+      border-color: var(--color-info-soft-border);
     }
 
     .direction-badge {
@@ -256,10 +365,6 @@ export class TransactionTableComponent {
   showDirection = input(false);
 
   pageChange = output<number>();
-
-  shortId(id: string): string {
-    return id.slice(0, 8);
-  }
 
   statusLabel(status: TransactionRow['status']): string {
     switch (status) {

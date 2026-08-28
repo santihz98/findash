@@ -22,6 +22,8 @@ const transaction: AuditTransaction = {
   authorizationCode: 'ABC123',
   status: 'COMPLETED',
   createdAt: '2026-08-28T00:00:00.000Z',
+  originAccount: { accountNumber: '1000000001', accountType: 'BASIC', ownerEmail: 'basic@findash.dev', ownerDocumentNumber: '1010000002' },
+  destAccount: { accountNumber: '1000000002', accountType: 'PREMIUM', ownerEmail: 'premium@findash.dev', ownerDocumentNumber: '1010000003' },
 };
 
 const result: ListTransactionsAuditResult = {
