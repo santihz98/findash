@@ -165,7 +165,8 @@ cat > /tmp/findash-task-def.json << EOF
       "environment": [
         { "name": "NODE_ENV", "value": "production" },
         { "name": "JWT_ACCESS_EXPIRES_IN", "value": "15m" },
-        { "name": "JWT_REFRESH_EXPIRES_IN", "value": "7d" }
+        { "name": "JWT_REFRESH_EXPIRES_IN", "value": "7d" },
+        { "name": "CORS_ORIGIN", "value": "http://localhost:4200,http://findash-frontend-7874505.s3-website.us-east-2.amazonaws.com" }
       ],
       "secrets": [
         { "name": "DATABASE_URL", "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:findash/DATABASE_URL" },

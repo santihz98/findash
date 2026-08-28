@@ -1,14 +1,16 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 import { DomainExceptionFilter } from './shared/filters/http-exception.filter';
+import { parseCorsOrigins } from './shared/config/cors.config';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
   app.useGlobalFilters(new DomainExceptionFilter());
-  app.enableCors();
+  app.enableCors({ origin: parseCorsOrigins(app.get(ConfigService)) });
 
   // Sesión "Swagger/OpenAPI": documento vivo de la API real, no boilerplate.
   // Se sirve en /api/docs tanto en local (npm run start:dev) como dentro de
