@@ -1,5 +1,5 @@
 import { Prisma, TransactionStatus } from '@prisma/client';
-import { Transaction } from '../entities/transaction.entity';
+import { Transaction, TransactionWithDirection } from '../entities/transaction.entity';
 import { TransactionContext } from '../../../../shared/database/transaction-context';
 
 export interface CreateTransactionData {
@@ -22,6 +22,30 @@ export interface CreateTransactionData {
    * el conflicto de UNIQUE en `schema.prisma`. */
   idempotencyKey: string | null;
   status: TransactionStatus;
+}
+
+/** Sesión 17 (RF-02) — `GET /transactions/me`: paginado, sin filtros (el
+ * enunciado no los pide para el CLIENT, solo para el ADMIN que audita). */
+export interface ListTransactionsByAccountFilter {
+  accountId: string;
+  page: number;
+  limit: number;
+}
+
+/** Sesión 17 (RF-02) — `GET /transactions` (solo ADMIN, "auditar
+ * transacciones"): sin ningún scope de cuenta, con filtros opcionales de
+ * status y rango de fechas (sobre `createdAt`), combinables entre sí. */
+export interface ListTransactionsAdminFilter {
+  page: number;
+  limit: number;
+  status?: TransactionStatus;
+  dateFrom?: Date;
+  dateTo?: Date;
+}
+
+export interface PaginatedTransactions<T> {
+  data: T[];
+  total: number;
 }
 
 export interface ITransactionRepository {
@@ -58,6 +82,19 @@ export interface ITransactionRepository {
    * use case. Fuera de cualquier transacción a propósito: se llama después
    * de que la transferencia original ya hizo commit. */
   findById(id: string): Promise<Transaction | null>;
+
+  /** RF-02 (Sesión 17) — `GET /transactions/me`: todas las filas donde
+   * `accountId` es origen O destino (no solo las enviadas), con `direction`
+   * calculada relativa a esa cuenta. Incluye REJECTED/FAILED — el CLIENT
+   * también debe ver sus intentos fallidos, no solo los COMPLETED. */
+  findManyByAccountId(
+    filter: ListTransactionsByAccountFilter,
+  ): Promise<PaginatedTransactions<TransactionWithDirection>>;
+
+  /** RF-02 (Sesión 17) — `GET /transactions` (solo ADMIN): TODAS las
+   * transacciones de la plataforma, sin scope de cuenta, filtrables por
+   * status y/o rango de fechas. */
+  findManyAdmin(filter: ListTransactionsAdminFilter): Promise<PaginatedTransactions<Transaction>>;
 }
 
 export const TRANSACTION_REPOSITORY = Symbol('TRANSACTION_REPOSITORY');

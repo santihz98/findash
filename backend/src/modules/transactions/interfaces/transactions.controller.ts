@@ -1,9 +1,13 @@
-import { Body, Controller, HttpCode, HttpStatus, Post, Req, UseGuards, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Post, Query, Req, UseGuards, UseInterceptors } from '@nestjs/common';
 import { ApiBearerAuth, ApiHeader, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Request } from 'express';
 import { Role } from '@prisma/client';
 import { CreateTransferUseCase } from '../application/use-cases/create-transfer.use-case';
+import { ListMyTransactionsUseCase } from '../application/use-cases/list-my-transactions.use-case';
+import { ListTransactionsUseCase } from '../application/use-cases/list-transactions.use-case';
 import { CreateTransferDto } from './dto/create-transfer.dto';
+import { ListMyTransactionsQueryDto } from './dto/list-my-transactions-query.dto';
+import { ListTransactionsQueryDto } from './dto/list-transactions-query.dto';
 import { JwtAuthGuard } from '../../../shared/guards/jwt-auth.guard';
 import { RolesGuard } from '../../../shared/guards/roles.guard';
 import { Roles } from '../../../shared/decorators/roles.decorator';
@@ -16,7 +20,11 @@ import { IdempotencyInterceptor } from './interceptors/idempotency.interceptor';
 @ApiBearerAuth('access-token')
 @Controller('transactions')
 export class TransactionsController {
-  constructor(private readonly createTransferUseCase: CreateTransferUseCase) {}
+  constructor(
+    private readonly createTransferUseCase: CreateTransferUseCase,
+    private readonly listMyTransactionsUseCase: ListMyTransactionsUseCase,
+    private readonly listTransactionsUseCase: ListTransactionsUseCase,
+  ) {}
 
   // Solo CLIENT (explícito, no solo "porque un ADMIN no tiene cuenta"): un
   // ADMIN no debería poder transferir aunque llegara a tener una cuenta.
@@ -114,6 +122,105 @@ export class TransactionsController {
       destAccountId: dto.destAccountId,
       amount: dto.amount,
       idempotencyKey,
+    });
+  }
+
+  // RF-02 (Sesión 17) — historial de movimientos, solo CLIENT. El userId
+  // sale del JWT (nunca de un param/query), mismo criterio que
+  // GET /accounts/me — estructuralmente no existe forma de pedir el
+  // historial de otro usuario por acá.
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.CLIENT)
+  @Get('me')
+  @ApiOperation({
+    summary: 'Historial de movimientos de la cuenta del usuario autenticado, paginado (solo CLIENT)',
+    description:
+      'Incluye transacciones enviadas Y recibidas (campo `direction`: "SENT"/"RECEIVED", relativo a la cuenta consultada) — no solo las que el usuario originó. Incluye también intentos fallidos/rechazados (`status`: REJECTED/FAILED), no solo COMPLETED, para que el usuario vea igualmente sus intentos sin éxito.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Página de resultados (posiblemente vacía).',
+    schema: {
+      example: {
+        data: [
+          {
+            id: '0b89721a-1370-4f69-b201-7427efe1125c',
+            originAccountId: '57d1b569-5127-44d7-b464-2e6a2a2ef17b',
+            destAccountId: '558944c9-2eaf-431d-b6e0-a3d9b59c2001',
+            amount: '100.00',
+            commission: '2.00',
+            authorizationCode: '36211CC2A6FD',
+            status: 'COMPLETED',
+            createdAt: '2026-08-27T16:05:41.540Z',
+            direction: 'SENT',
+          },
+        ],
+        page: 1,
+        limit: 20,
+        total: 1,
+        totalPages: 1,
+      },
+    },
+  })
+  @ApiResponse({ status: 400, description: 'page < 1 o limit > 100.' })
+  @ApiResponse({ status: 401, description: 'Token ausente, inválido o expirado.' })
+  @ApiResponse({ status: 403, description: 'Autenticado pero no es CLIENT.' })
+  @ApiResponse({
+    status: 422,
+    description: 'El usuario autenticado no tiene exactamente una cuenta propia (ver NoOriginAccountException).',
+  })
+  me(@CurrentUser() user: AccessTokenPayload, @Query() query: ListMyTransactionsQueryDto) {
+    return this.listMyTransactionsUseCase.execute({
+      userId: user.sub,
+      page: query.page,
+      limit: query.limit,
+    });
+  }
+
+  // RF-02 (Sesión 17) — "auditar transacciones", solo ADMIN. TODAS las
+  // transacciones de la plataforma, sin scope de cuenta.
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN)
+  @Get()
+  @ApiOperation({
+    summary: 'Lista TODAS las transacciones de la plataforma, paginado, filtrable por status y/o rango de fechas (solo ADMIN)',
+    description:
+      'A diferencia de GET /transactions/me, no está scopeado a ninguna cuenta — es la vista de auditoría. `dateFrom`/`dateTo` filtran sobre `createdAt` y son combinables entre sí y con `status`.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Página de resultados (posiblemente vacía).',
+    schema: {
+      example: {
+        data: [
+          {
+            id: '0b89721a-1370-4f69-b201-7427efe1125c',
+            originAccountId: '57d1b569-5127-44d7-b464-2e6a2a2ef17b',
+            destAccountId: '558944c9-2eaf-431d-b6e0-a3d9b59c2001',
+            amount: '100.00',
+            commission: '2.00',
+            authorizationCode: '36211CC2A6FD',
+            status: 'COMPLETED',
+            createdAt: '2026-08-27T16:05:41.540Z',
+          },
+        ],
+        page: 1,
+        limit: 20,
+        total: 1,
+        totalPages: 1,
+      },
+    },
+  })
+  @ApiResponse({ status: 400, description: 'page < 1, limit > 100, status fuera del enum, o dateFrom/dateTo no son ISO 8601 válidos.' })
+  @ApiResponse({ status: 401, description: 'Token ausente, inválido o expirado.' })
+  @ApiResponse({ status: 403, description: 'Autenticado pero no es ADMIN.' })
+  list(@Query() query: ListTransactionsQueryDto) {
+    return this.listTransactionsUseCase.execute({
+      page: query.page,
+      limit: query.limit,
+      status: query.status,
+      dateFrom: query.dateFrom ? new Date(query.dateFrom) : undefined,
+      dateTo: query.dateTo ? new Date(query.dateTo) : undefined,
     });
   }
 }

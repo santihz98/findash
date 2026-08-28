@@ -15,9 +15,12 @@ import { Account } from '../../accounts/domain/entities/account.entity';
 import {
   CreateTransactionData,
   ITransactionRepository,
+  ListTransactionsAdminFilter,
+  ListTransactionsByAccountFilter,
+  PaginatedTransactions,
   TRANSACTION_REPOSITORY,
 } from '../domain/ports/transaction.repository.port';
-import { Transaction } from '../domain/entities/transaction.entity';
+import { Transaction, TransactionWithDirection } from '../domain/entities/transaction.entity';
 import {
   IDEMPOTENCY_KEY_REPOSITORY,
   IIdempotencyKeyRepository,
@@ -110,6 +113,37 @@ class FakeTransactionRepository implements ITransactionRepository {
   async findById(id: string): Promise<Transaction | null> {
     return this.byId.get(id) ?? null;
   }
+
+  // RF-02 (Sesión 17): filtra/pagina en memoria sobre lo ya creado — el
+  // orden y los filtros reales contra Postgres se prueban en
+  // prisma-transaction.repository.spec.ts, este archivo solo necesita
+  // guards/roles/aislamiento entre usuarios.
+  async findManyByAccountId(
+    filter: ListTransactionsByAccountFilter,
+  ): Promise<PaginatedTransactions<TransactionWithDirection>> {
+    const all = Array.from(this.byId.values())
+      .filter((t) => t.originAccountId === filter.accountId || t.destAccountId === filter.accountId)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    const total = all.length;
+    const start = (filter.page - 1) * filter.limit;
+    const data = all.slice(start, start + filter.limit).map(
+      (t): TransactionWithDirection => ({
+        ...t,
+        direction: t.originAccountId === filter.accountId ? 'SENT' : 'RECEIVED',
+      }),
+    );
+    return { data, total };
+  }
+
+  async findManyAdmin(filter: ListTransactionsAdminFilter): Promise<PaginatedTransactions<Transaction>> {
+    let all = Array.from(this.byId.values()).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    if (filter.status) all = all.filter((t) => t.status === filter.status);
+    if (filter.dateFrom) all = all.filter((t) => t.createdAt >= filter.dateFrom!);
+    if (filter.dateTo) all = all.filter((t) => t.createdAt <= filter.dateTo!);
+    const total = all.length;
+    const start = (filter.page - 1) * filter.limit;
+    return { data: all.slice(start, start + filter.limit), total };
+  }
 }
 
 // RN-01 (Sesión 5): fake en memoria — así este archivo se queda sin tocar
@@ -155,11 +189,16 @@ describe('Transactions (integración): guards, roles, y "no desde una cuenta aje
   let admin: AuthUser;
   let client1: AuthUser;
   let client2: AuthUser;
+  let client3: AuthUser;
   let accountRepo: FakeAccountRepository;
   let txRepo: FakeTransactionRepository;
 
   const ACCOUNT_CLIENT1 = 'acc-client-1';
   const ACCOUNT_CLIENT2 = 'acc-client-2';
+  // Cuenta dedicada para los tests de GET /transactions/me y GET /transactions
+  // (Sesión 17) — así no dependen del estado mutable que dejan los tests de
+  // transfer de arriba (balances/filas ya creadas en client1/client2).
+  const ACCOUNT_CLIENT3 = 'acc-client-3';
 
   async function loginAndGetToken(email: string): Promise<string> {
     const res = await request(app.getHttpServer())
@@ -188,6 +227,13 @@ describe('Transactions (integración): guards, roles, y "no desde una cuenta aje
       passwordHash,
       role: Role.CLIENT,
     };
+    client3 = {
+      id: 'user-client-3',
+      email: 'client3@findash.dev',
+      documentNumber: '4',
+      passwordHash,
+      role: Role.CLIENT,
+    };
 
     accountRepo = new FakeAccountRepository([
       {
@@ -205,6 +251,15 @@ describe('Transactions (integración): guards, roles, y "no desde una cuenta aje
         accountNumber: '1000000002',
         balance: '500.00',
         accountType: AccountType.PREMIUM,
+        status: AccountStatus.ACTIVE,
+        avatarUrl: null,
+      },
+      {
+        id: ACCOUNT_CLIENT3,
+        userId: client3.id,
+        accountNumber: '1000000003',
+        balance: '300.00',
+        accountType: AccountType.BASIC,
         status: AccountStatus.ACTIVE,
         avatarUrl: null,
       },
@@ -231,7 +286,7 @@ describe('Transactions (integración): guards, roles, y "no desde una cuenta aje
       ],
     })
       .overrideProvider(USER_REPOSITORY)
-      .useValue(new FakeUserRepository([admin, client1, client2]))
+      .useValue(new FakeUserRepository([admin, client1, client2, client3]))
       .overrideProvider(ACCOUNT_REPOSITORY)
       .useValue(accountRepo)
       .overrideProvider(TRANSACTION_REPOSITORY)
@@ -360,5 +415,220 @@ describe('Transactions (integración): guards, roles, y "no desde una cuenta aje
       .set('X-Idempotency-Key', randomUUID())
       .send({ destAccountId: ACCOUNT_CLIENT1, amount: '10' })
       .expect(403);
+  });
+
+  // RF-02 (Sesión 17): historial de movimientos + auditoría ADMIN. Datos
+  // sembrados directo en txRepo (no vía HTTP) para tener control exacto de
+  // quién es origen/destino/status — así los asserts no dependen del estado
+  // mutable que van dejando los tests de transfer de arriba.
+  describe('GET /transactions/me (RF-02): historial de movimientos del CLIENT', () => {
+    const boundary = new Date(Date.now() - 1000);
+
+    beforeAll(async () => {
+      // client3 -> client1 (COMPLETED): SENT para client3, RECEIVED para client1.
+      await txRepo.create({
+        originAccountId: ACCOUNT_CLIENT3,
+        destAccountId: ACCOUNT_CLIENT1,
+        amount: new Prisma.Decimal('40.00'),
+        commission: new Prisma.Decimal('0.80'),
+        authorizationCode: 'ME-TEST-SENT01',
+        idempotencyKey: 'me-test-sent-key-1',
+        status: TransactionStatus.COMPLETED,
+      });
+      // client1 -> client3 (COMPLETED): RECEIVED para client3, SENT para client1.
+      await txRepo.create({
+        originAccountId: ACCOUNT_CLIENT1,
+        destAccountId: ACCOUNT_CLIENT3,
+        amount: new Prisma.Decimal('25.00'),
+        commission: new Prisma.Decimal('0.50'),
+        authorizationCode: 'ME-TEST-RECV01',
+        idempotencyKey: 'me-test-recv-key-1',
+        status: TransactionStatus.COMPLETED,
+      });
+      // client3 -> client1, REJECTED: un intento fallido — el CLIENT también
+      // debe verlo, no solo los COMPLETED (criterio explícito de la tarea).
+      await txRepo.create({
+        originAccountId: ACCOUNT_CLIENT3,
+        destAccountId: ACCOUNT_CLIENT1,
+        amount: new Prisma.Decimal('9999.00'),
+        commission: new Prisma.Decimal('199.98'),
+        authorizationCode: null,
+        idempotencyKey: null,
+        status: TransactionStatus.REJECTED,
+      });
+      // client2 -> client3, EXCLUSIVA de ambos — nunca debe aparecerle a client1.
+      await txRepo.create({
+        originAccountId: ACCOUNT_CLIENT2,
+        destAccountId: ACCOUNT_CLIENT3,
+        amount: new Prisma.Decimal('12.00'),
+        commission: new Prisma.Decimal('0.00'),
+        authorizationCode: 'ME-TEST-EXCLUSIVE01',
+        idempotencyKey: 'me-test-exclusive-key-1',
+        status: TransactionStatus.COMPLETED,
+      });
+      // client1 -> client2, RUIDO — nunca debe aparecerle a client3.
+      await txRepo.create({
+        originAccountId: ACCOUNT_CLIENT1,
+        destAccountId: ACCOUNT_CLIENT2,
+        amount: new Prisma.Decimal('5.00'),
+        commission: new Prisma.Decimal('0.10'),
+        authorizationCode: 'ME-TEST-NOISE01',
+        idempotencyKey: 'me-test-noise-key-1',
+        status: TransactionStatus.COMPLETED,
+      });
+    });
+
+    it('devuelve enviadas Y recibidas con direction correcto, incluidos intentos REJECTED, sin las de otras cuentas', async () => {
+      const token = await loginAndGetToken(client3.email);
+
+      const res = await request(app.getHttpServer())
+        .get('/transactions/me')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+
+      expect(res.body).toMatchObject({ page: 1, limit: 20, total: 4, totalPages: 1 });
+      const rows = res.body.data as Array<Record<string, unknown>>;
+      expect(rows).toHaveLength(4);
+      expect(rows.every((t) => t.originAccountId === ACCOUNT_CLIENT3 || t.destAccountId === ACCOUNT_CLIENT3)).toBe(
+        true,
+      );
+      expect(rows.some((t) => t.authorizationCode === 'ME-TEST-SENT01' && t.direction === 'SENT')).toBe(true);
+      expect(rows.some((t) => t.authorizationCode === 'ME-TEST-RECV01' && t.direction === 'RECEIVED')).toBe(true);
+      expect(rows.some((t) => t.status === 'REJECTED' && t.direction === 'SENT' && t.amount === '9999.00')).toBe(
+        true,
+      );
+      expect(rows.some((t) => t.authorizationCode === 'ME-TEST-EXCLUSIVE01')).toBe(true);
+      // Nunca la fila de ruido entre client1 y client2 — client3 no participa.
+      expect(rows.some((t) => t.authorizationCode === 'ME-TEST-NOISE01')).toBe(false);
+    });
+
+    it('un CLIENT nunca ve transacciones ajenas, ni inyectando params extra que no son parte del DTO', async () => {
+      const token = await loginAndGetToken(client1.email);
+
+      // client1 intenta colarse en el historial de client3 vía query params
+      // que no existen en ListMyTransactionsQueryDto — ValidationPipe
+      // (whitelist: true, ver main.ts) los descarta antes de llegar al
+      // controller, así que el userId real sigue saliendo solo del JWT.
+      const res = await request(app.getHttpServer())
+        .get(`/transactions/me?accountId=${ACCOUNT_CLIENT3}&userId=${client3.id}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+
+      const rows = res.body.data as Array<Record<string, unknown>>;
+      expect(rows.every((t) => t.originAccountId === ACCOUNT_CLIENT1 || t.destAccountId === ACCOUNT_CLIENT1)).toBe(
+        true,
+      );
+      // La transacción EXCLUSIVA entre client2 y client3 nunca debe aparecer:
+      // client1 no participa en ella, sin importar qué params extra mande.
+      expect(rows.some((t) => t.authorizationCode === 'ME-TEST-EXCLUSIVE01')).toBe(false);
+    });
+
+    it('pagina de verdad: limit=1 corta a una fila por página, sin duplicar ni saltear', async () => {
+      const token = await loginAndGetToken(client3.email);
+
+      const page1 = await request(app.getHttpServer())
+        .get('/transactions/me?limit=1&page=1')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+      const page2 = await request(app.getHttpServer())
+        .get('/transactions/me?limit=1&page=2')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+
+      expect(page1.body).toMatchObject({ page: 1, limit: 1, total: 4, totalPages: 4 });
+      expect(page2.body).toMatchObject({ page: 2, limit: 1, total: 4, totalPages: 4 });
+      expect(page1.body.data).toHaveLength(1);
+      expect(page2.body.data).toHaveLength(1);
+      expect(page1.body.data[0].id).not.toBe(page2.body.data[0].id);
+    });
+
+    it('rechaza con 401 sin token', async () => {
+      await request(app.getHttpServer()).get('/transactions/me').expect(401);
+    });
+
+    it('rechaza con 403 a un ADMIN (el endpoint es solo-CLIENT)', async () => {
+      const token = await loginAndGetToken(admin.email);
+      await request(app.getHttpServer())
+        .get('/transactions/me')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(403);
+    });
+
+    it('GET /transactions (auditoría, solo ADMIN) ve TODAS las transacciones, incluida la que no involucra a client1', async () => {
+      const token = await loginAndGetToken(admin.email);
+
+      const res = await request(app.getHttpServer())
+        .get('/transactions?limit=100')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+
+      const codes = (res.body.data as Array<Record<string, unknown>>).map((t) => t.authorizationCode);
+      expect(codes).toEqual(
+        expect.arrayContaining(['ME-TEST-SENT01', 'ME-TEST-RECV01', 'ME-TEST-EXCLUSIVE01', 'ME-TEST-NOISE01']),
+      );
+    });
+
+    it('GET /transactions rechaza con 403 a un CLIENT', async () => {
+      const token = await loginAndGetToken(client1.email);
+      await request(app.getHttpServer())
+        .get('/transactions')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(403);
+    });
+
+    it('GET /transactions filtra por status, combinable con dateFrom', async () => {
+      const token = await loginAndGetToken(admin.email);
+
+      const res = await request(app.getHttpServer())
+        .get(`/transactions?status=REJECTED&dateFrom=${boundary.toISOString()}&limit=100`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+
+      const rows = res.body.data as Array<Record<string, unknown>>;
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.every((t) => t.status === 'REJECTED')).toBe(true);
+      expect(rows.some((t) => t.amount === '9999.00')).toBe(true);
+    });
+
+    it('GET /transactions filtra con dateFrom y dateTo combinados', async () => {
+      const token = await loginAndGetToken(admin.email);
+      const dateTo = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+      const res = await request(app.getHttpServer())
+        .get(`/transactions?status=REJECTED&dateFrom=${boundary.toISOString()}&dateTo=${dateTo}&limit=100`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+
+      expect(res.body.data.some((t: Record<string, unknown>) => t.amount === '9999.00')).toBe(true);
+    });
+
+    it('GET /transactions con dateFrom en el futuro no devuelve nada', async () => {
+      const token = await loginAndGetToken(admin.email);
+      const future = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+      const res = await request(app.getHttpServer())
+        .get(`/transactions?dateFrom=${future}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+
+      expect(res.body.data).toHaveLength(0);
+      expect(res.body.total).toBe(0);
+    });
+
+    it('GET /transactions rechaza status fuera del enum con 400', async () => {
+      const token = await loginAndGetToken(admin.email);
+      await request(app.getHttpServer())
+        .get('/transactions?status=NOT_A_REAL_STATUS')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(400);
+    });
+
+    it('GET /transactions rechaza dateFrom no-ISO8601 con 400', async () => {
+      const token = await loginAndGetToken(admin.email);
+      await request(app.getHttpServer())
+        .get('/transactions?dateFrom=not-a-date')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(400);
+    });
   });
 });

@@ -22,3 +22,17 @@ export interface Transaction {
   status: TransactionStatus;
   createdAt: Date;
 }
+
+/**
+ * RF-02 (GET /transactions/me, historial de movimientos) — dirección
+ * relativa a la cuenta consultada, no un atributo propio de la fila: la
+ * misma `Transaction` sería 'SENT' para quien la mira desde su cuenta
+ * origen y 'RECEIVED' para quien la mira desde su cuenta destino. Se
+ * calcula en el repositorio (compara `originAccountId` contra la cuenta
+ * consultada), nunca se persiste.
+ */
+export type TransactionDirection = 'SENT' | 'RECEIVED';
+
+export interface TransactionWithDirection extends Transaction {
+  direction: TransactionDirection;
+}

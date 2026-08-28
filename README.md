@@ -186,6 +186,40 @@ curl -s -w "\n%{http_code}\n" -X POST http://localhost:3000/transactions/transfe
   -d "{\"destAccountId\":\"$PREMIUM_ID\",\"amount\":\"10\"}"
 ```
 
+### Probar historial de movimientos y auditoría (Sesión 17, RF-02) con curl
+
+`GET /transactions/me` es solo-CLIENT: historial de la cuenta del usuario autenticado, enviadas Y recibidas (campo `direction`: `SENT`/`RECEIVED`, relativo a esa cuenta), incluidos los intentos REJECTED/FAILED — no solo los COMPLETED. `GET /transactions` es solo-ADMIN: TODAS las transacciones de la plataforma, sin scope de cuenta, filtrables por `status` y/o rango de fechas (`dateFrom`/`dateTo`, ISO 8601, combinables entre sí y con `status`). Paginación real (`page`/`limit`, mismos límites que `GET /accounts`: `limit` máximo 100, rechazado con 400 si se excede).
+
+```bash
+BASIC_TOKEN=$(curl -s -X POST http://localhost:3000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"basic@findash.dev","password":"Demo1234!"}' | python3 -c "import json,sys;print(json.load(sys.stdin)['accessToken'])")
+ADMIN_TOKEN=$(curl -s -X POST http://localhost:3000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@findash.dev","password":"Demo1234!"}' | python3 -c "import json,sys;print(json.load(sys.stdin)['accessToken'])")
+
+# Historial propio, paginado (defaults: page=1, limit=20)
+curl -s http://localhost:3000/transactions/me -H "Authorization: Bearer $BASIC_TOKEN"
+# → {"data":[{"id":"...","direction":"SENT","status":"COMPLETED",...}, ...],"page":1,"limit":20,"total":N,"totalPages":M}
+
+# Un ADMIN no puede pedir el historial "de cuenta" (403) — /transactions/me es solo-CLIENT
+curl -s -w "\n%{http_code}\n" http://localhost:3000/transactions/me -H "Authorization: Bearer $ADMIN_TOKEN"
+
+# Auditoría completa (solo ADMIN) — TODAS las transacciones de la plataforma
+curl -s "http://localhost:3000/transactions?limit=5" -H "Authorization: Bearer $ADMIN_TOKEN"
+
+# Un CLIENT recibe 403 acá — GET /transactions es solo-ADMIN
+curl -s -w "\n%{http_code}\n" http://localhost:3000/transactions -H "Authorization: Bearer $BASIC_TOKEN"
+
+# Filtro por status, combinable con rango de fechas (createdAt)
+curl -s "http://localhost:3000/transactions?status=REJECTED&dateFrom=2026-08-01&dateTo=2026-12-31T23:59:59.999Z" \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+
+# status fuera del enum o dateFrom/dateTo no-ISO8601 -> 400
+curl -s -w "\n%{http_code}\n" "http://localhost:3000/transactions?status=NOPE" -H "Authorization: Bearer $ADMIN_TOKEN"
+curl -s -w "\n%{http_code}\n" "http://localhost:3000/transactions?dateFrom=not-a-date" -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
 ---
 
 ## Frontend

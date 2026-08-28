@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { AccountsModule } from '../accounts/accounts.module';
 import { TransactionsController } from './interfaces/transactions.controller';
 import { CreateTransferUseCase } from './application/use-cases/create-transfer.use-case';
+import { ListMyTransactionsUseCase } from './application/use-cases/list-my-transactions.use-case';
+import { ListTransactionsUseCase } from './application/use-cases/list-transactions.use-case';
 import { AuthorizationCodeGeneratorService } from './application/services/authorization-code-generator.service';
 import { PrismaTransactionRepository } from './infrastructure/prisma-transaction.repository';
 import { TRANSACTION_REPOSITORY } from './domain/ports/transaction.repository.port';
@@ -19,6 +21,8 @@ import { RandomDelayProvider, DELAY_PROVIDER } from './infrastructure/random-del
   controllers: [TransactionsController],
   providers: [
     CreateTransferUseCase,
+    ListMyTransactionsUseCase,
+    ListTransactionsUseCase,
     AuthorizationCodeGeneratorService,
     IdempotencyInterceptor,
     { provide: TRANSACTION_REPOSITORY, useClass: PrismaTransactionRepository },
