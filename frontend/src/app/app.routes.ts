@@ -41,6 +41,27 @@ export const routes: Routes = [
             (m) => m.TransferFormPage,
           ),
       },
+      // RF-02 (Sesión 18 del frontend) — historial de movimientos del
+      // CLIENT. Ruta propia, no una sección dentro de /transfer (ver el
+      // comentario en transfer-history.page.ts y PROGRESS.md para la
+      // justificación completa).
+      {
+        path: 'transfer/history',
+        canActivate: [roleGuard(['CLIENT'])],
+        loadComponent: () =>
+          import('./features/transfer/containers/transfer-history.page').then(
+            (m) => m.TransferHistoryPage,
+          ),
+      },
+      // RF-02 (Sesión 18 del frontend) — auditoría de transacciones, ADMIN.
+      {
+        path: 'transactions',
+        canActivate: [roleGuard(['ADMIN'])],
+        loadComponent: () =>
+          import('./features/transactions-audit/containers/transactions-audit.page').then(
+            (m) => m.TransactionsAuditPage,
+          ),
+      },
     ],
   },
 ];

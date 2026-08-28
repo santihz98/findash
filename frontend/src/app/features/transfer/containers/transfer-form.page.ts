@@ -142,7 +142,7 @@ import {
           type="submit"
           class="btn btn--primary"
           [class.btn--loading]="submitting()"
-          [disabled]="submitting()"
+          [disabled]="submitting() || form.invalid"
         >
           {{ submitting() ? 'Verificando la transferencia…' : 'Transferir' }}
         </button>

@@ -184,6 +184,29 @@ describe('TransferFormPage', () => {
     });
   });
 
+  describe('botón "Transferir" deshabilitado con formulario inválido (Sesión 18, bug fix)', () => {
+    it('is disabled while the form is empty/invalid, even though not submitting', () => {
+      const { fixture } = create();
+
+      const button = fixture.debugElement.query(By.css('button[type=submit]'));
+      expect(fixture.componentInstance.form.invalid).toBe(true);
+      expect(button.nativeElement.disabled).toBe(true);
+    });
+
+    it('becomes enabled once the form has valid values, and disabled again if cleared', () => {
+      const { fixture } = create();
+      const button = fixture.debugElement.query(By.css('button[type=submit]'));
+
+      fixture.componentInstance.form.setValue({ destAccountId: 'dest-1', amount: '10.00' });
+      fixture.detectChanges();
+      expect(button.nativeElement.disabled).toBe(false);
+
+      fixture.componentInstance.form.setValue({ destAccountId: '', amount: '' });
+      fixture.detectChanges();
+      expect(button.nativeElement.disabled).toBe(true);
+    });
+  });
+
   describe('submit exitoso (tarea 5, 201)', () => {
     it('dispatches submitTransfer with the typed values and a fresh UUID idempotencyKey', () => {
       const { fixture, dispatchSpy } = create();

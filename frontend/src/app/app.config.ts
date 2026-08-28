@@ -15,6 +15,10 @@ import { AuthEffects } from './state/auth/auth.effects';
 import { authFeature } from './state/auth/auth.reducer';
 import { MyAccountEffects } from './state/myAccount/my-account.effects';
 import { myAccountFeature } from './state/myAccount/my-account.reducer';
+import { MyTransactionsEffects } from './state/myTransactions/my-transactions.effects';
+import { myTransactionsFeature } from './state/myTransactions/my-transactions.reducer';
+import { TransactionsAuditEffects } from './state/transactionsAudit/transactions-audit.effects';
+import { transactionsAuditFeature } from './state/transactionsAudit/transactions-audit.reducer';
 import { TransferEffects } from './state/transfer/transfer.effects';
 import { transferFeature } from './state/transfer/transfer.reducer';
 
@@ -35,7 +39,16 @@ export const appConfig: ApplicationConfig = {
     provideState(accountsFeature),
     provideState(myAccountFeature),
     provideState(transferFeature),
-    provideEffects([AuthEffects, AccountsEffects, MyAccountEffects, TransferEffects]),
+    provideState(myTransactionsFeature),
+    provideState(transactionsAuditFeature),
+    provideEffects([
+      AuthEffects,
+      AccountsEffects,
+      MyAccountEffects,
+      TransferEffects,
+      MyTransactionsEffects,
+      TransactionsAuditEffects,
+    ]),
     provideStoreDevtools({ maxAge: 25, logOnly: !isDevMode() }),
   ],
 };
