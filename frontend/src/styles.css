@@ -1,1 +1,423 @@
-/* You can add global styles to this file, and also import other style files */
+/*
+ * FinDash — sistema de diseño mínimo (Sesión 16).
+ * Fuente de verdad de tokens visuales: paleta, tipografía, espaciado,
+ * radios. Los componentes consumen estas custom properties en vez de
+ * repetir valores — ver PROGRESS.md, Sesión 16, para el detalle de cada
+ * decisión.
+ */
+
+:root {
+  /* ---- Color: marca (rojo garnet, no el rojo "alerta" de los estados) ---- */
+  --color-primary: #9c1a2e;
+  --color-primary-hover: #7e1425;
+  --color-primary-active: #631020;
+  --color-primary-soft: #fbeced;
+  --color-primary-soft-border: #f0c9cc;
+  --color-primary-contrast: #ffffff;
+
+  /* ---- Color: superficie / neutrales (blanco cálido, no gris frío) ---- */
+  --color-bg: #faf8f7;
+  --color-surface: #ffffff;
+  --color-surface-sunken: #f5f1f0;
+  --color-border: #e7e0df;
+  --color-border-strong: #d3c8c7;
+  --color-ink: #201b1c;
+  --color-ink-muted: #6b6161;
+  --color-ink-faint: #948b8a;
+
+  /* ---- Color: estados semánticos (distintos entre sí y del rojo de marca) ---- */
+  --color-success: #1b7f4c;
+  --color-success-soft: #e8f6ee;
+  --color-success-soft-border: #b8e3c9;
+
+  --color-warning: #9a5b0a;
+  --color-warning-soft: #fdf1de;
+  --color-warning-soft-border: #f2d59a;
+
+  --color-danger: #b3261e;
+  --color-danger-soft: #fbeceb;
+  --color-danger-soft-border: #f0c3c0;
+
+  --color-info: #205ea1;
+  --color-info-soft: #eaf2fb;
+  --color-info-soft-border: #c3dbf2;
+
+  --color-conflict: #6b3fa0;
+  --color-conflict-soft: #f2ecfa;
+  --color-conflict-soft-border: #d9c6ef;
+
+  /* ---- Tipografía: 1 fuente del sistema (sin dependencia de red), escala corta ---- */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --fs-sm: 0.875rem;
+  --fs-base: 1rem;
+  --fs-lg: 1.125rem;
+  --fs-xl: 1.375rem;
+  --fs-2xl: 1.875rem;
+  --lh-base: 1.5;
+
+  /* ---- Espaciado: múltiplos de 4px ---- */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+  --space-8: 4rem;
+
+  /* ---- Radios ---- */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-full: 999px;
+
+  /* ---- Sombras ---- */
+  --shadow-sm: 0 1px 2px rgba(32, 27, 28, 0.06);
+  --shadow-md: 0 4px 16px rgba(32, 27, 28, 0.08);
+  --shadow-lg: 0 16px 40px rgba(32, 27, 28, 0.14);
+
+  /* ---- Layout ---- */
+  --container-max: 1080px;
+  --header-height: 4rem;
+
+  color-scheme: light;
+}
+
+/* ---- Reset mínimo ---- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--fs-base);
+  line-height: var(--lh-base);
+  color: var(--color-ink);
+  background: var(--color-bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: var(--fs-2xl);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+h2 {
+  font-size: var(--fs-xl);
+  font-weight: 600;
+}
+
+button,
+input,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+a {
+  color: var(--color-primary);
+}
+
+/* ---- Layout compartido ---- */
+.page-container {
+  max-width: var(--container-max);
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+@media (max-width: 640px) {
+  .page-container {
+    padding: var(--space-4) var(--space-3);
+    gap: var(--space-4);
+  }
+}
+
+/* ---- Formularios ---- */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--color-ink-muted);
+}
+
+.field input,
+.field select {
+  font-weight: 400;
+  font-size: var(--fs-base);
+  color: var(--color-ink);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-3);
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.field input:focus-visible,
+.field select:focus-visible {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-primary-soft);
+}
+
+.field input.is-invalid {
+  border-color: var(--color-danger);
+}
+
+.field-error {
+  display: block;
+  margin-top: var(--space-1);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--color-danger);
+}
+
+/* ---- Botones ---- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-5);
+  font-size: var(--fs-base);
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    opacity 0.15s ease;
+}
+
+.btn--primary {
+  background: var(--color-primary);
+  color: var(--color-primary-contrast);
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+}
+
+.btn--primary:active:not(:disabled) {
+  background: var(--color-primary-active);
+}
+
+.btn--secondary {
+  background: var(--color-surface);
+  color: var(--color-ink);
+  border-color: var(--color-border-strong);
+}
+
+.btn--secondary:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.btn--ghost {
+  background: transparent;
+  color: var(--color-ink-muted);
+  border-color: transparent;
+  padding: var(--space-2) var(--space-4);
+}
+
+.btn--ghost:hover:not(:disabled) {
+  background: var(--color-surface-sunken);
+  color: var(--color-ink);
+}
+
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.btn--loading {
+  position: relative;
+  padding-left: var(--space-7);
+}
+
+.btn--loading::before {
+  content: '';
+  position: absolute;
+  left: var(--space-4);
+  width: 1rem;
+  height: 1rem;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.5);
+  border-top-color: #fff;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---- Banners: sistema único reutilizado por login/accounts/transfer ---- */
+.error-banner,
+.success-banner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border: 1px solid var(--color-danger-soft-border);
+  border-left: 4px solid var(--color-danger);
+  background: var(--color-danger-soft);
+  color: var(--color-ink);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  font-size: var(--fs-sm);
+}
+
+.error-banner p:first-child,
+.success-banner p:first-child {
+  font-weight: 600;
+  font-size: var(--fs-base);
+  color: var(--color-ink);
+}
+
+.error-banner__help {
+  color: var(--color-ink-muted);
+  font-weight: 400;
+}
+
+.error-banner button {
+  align-self: flex-start;
+}
+
+.success-banner {
+  border-left-color: var(--color-success);
+  border-color: var(--color-success-soft-border);
+  background: var(--color-success-soft);
+}
+
+/* Variantes semánticas de error-banner (tarea 3 TransferFormPage: los 6
+   códigos HTTP no deben verse todos iguales — ver transfer-error.util.ts
+   `variant` y PROGRESS.md Sesión 16). */
+.error-banner--blocked {
+  border-left-color: var(--color-danger);
+  background: var(--color-danger-soft);
+  border-color: var(--color-danger-soft-border);
+}
+
+.error-banner--validation {
+  border-left-color: var(--color-warning);
+  background: var(--color-warning-soft);
+  border-color: var(--color-warning-soft-border);
+}
+
+.error-banner--timeout {
+  border-left-color: var(--color-info);
+  background: var(--color-info-soft);
+  border-color: var(--color-info-soft-border);
+}
+
+.error-banner--conflict {
+  border-left-color: var(--color-conflict);
+  background: var(--color-conflict-soft);
+  border-color: var(--color-conflict-soft-border);
+}
+
+.error-banner__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: 700;
+  font-size: var(--fs-base);
+}
+
+.error-banner__icon {
+  font-size: var(--fs-lg);
+  line-height: 1;
+}
+
+.empty-state {
+  margin: 0;
+  padding: var(--space-5);
+  text-align: center;
+  color: var(--color-ink-muted);
+  background: var(--color-surface-sunken);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+}
+
+/* ---- Skeleton loader ---- */
+.skeleton-loader {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.skeleton-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+}
+
+.skeleton-cell {
+  border-radius: var(--radius-sm);
+  background: linear-gradient(
+    90deg,
+    var(--color-surface-sunken) 25%,
+    #ece5e4 37%,
+    var(--color-surface-sunken) 63%
+  );
+  background-size: 400% 100%;
+  animation: skeleton-shimmer 1.4s ease infinite;
+}
+
+.skeleton-cell--avatar {
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.skeleton-cell--text {
+  height: 0.875rem;
+  flex: 1;
+}
+
+.skeleton-cell--text.short {
+  flex: 0.5;
+}
+
+.skeleton-cell--card {
+  height: 2.5rem;
+  width: 100%;
+  border-radius: var(--radius-md);
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0 50%;
+  }
+}

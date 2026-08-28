@@ -4,7 +4,10 @@ import { RouterTestingHarness } from '@angular/router/testing';
 import { provideMockStore } from '@ngrx/store/testing';
 
 import { routes } from './app.routes';
+import { initialAccountsState } from './state/accounts/accounts.model';
 import { CurrentUser, initialAuthState } from './state/auth/auth.model';
+import { initialMyAccountState } from './state/myAccount/my-account.model';
+import { initialTransferState } from './state/transfer/transfer.model';
 
 const adminUser: CurrentUser = {
   id: 'user-1',
@@ -18,7 +21,10 @@ const clientUser: CurrentUser = { ...adminUser, id: 'user-2', role: 'CLIENT' };
 describe('routes', () => {
   it('lazy-loads HomePage on the root path', async () => {
     TestBed.configureTestingModule({
-      providers: [provideRouter(routes), provideMockStore({ initialState: { auth: initialAuthState } })],
+      providers: [
+        provideRouter(routes),
+        provideMockStore({ initialState: { auth: initialAuthState } }),
+      ],
     });
 
     const harness = await RouterTestingHarness.create('/');
@@ -30,7 +36,10 @@ describe('routes', () => {
 
   it('lazy-loads LoginPage on /login', async () => {
     TestBed.configureTestingModule({
-      providers: [provideRouter(routes), provideMockStore({ initialState: { auth: initialAuthState } })],
+      providers: [
+        provideRouter(routes),
+        provideMockStore({ initialState: { auth: initialAuthState } }),
+      ],
     });
 
     const harness = await RouterTestingHarness.create('/login');
@@ -43,7 +52,10 @@ describe('routes', () => {
       providers: [
         provideRouter(routes),
         provideMockStore({
-          initialState: { auth: { ...initialAuthState, accessToken: 'a', user: adminUser } },
+          initialState: {
+            auth: { ...initialAuthState, accessToken: 'a', user: adminUser },
+            accounts: initialAccountsState,
+          },
         }),
       ],
     });
@@ -55,7 +67,10 @@ describe('routes', () => {
 
   it('redirects /accounts to /login for an unauthenticated visitor', async () => {
     TestBed.configureTestingModule({
-      providers: [provideRouter(routes), provideMockStore({ initialState: { auth: initialAuthState } })],
+      providers: [
+        provideRouter(routes),
+        provideMockStore({ initialState: { auth: initialAuthState } }),
+      ],
     });
 
     await RouterTestingHarness.create('/accounts');
@@ -68,14 +83,20 @@ describe('routes', () => {
       providers: [
         provideRouter(routes),
         provideMockStore({
-          initialState: { auth: { ...initialAuthState, accessToken: 'a', user: clientUser } },
+          initialState: {
+            auth: { ...initialAuthState, accessToken: 'a', user: clientUser },
+            myAccount: initialMyAccountState,
+            transfer: initialTransferState,
+          },
         }),
       ],
     });
 
     const harness = await RouterTestingHarness.create('/transfer');
 
-    expect(harness.routeNativeElement?.querySelector('h1')?.textContent).toContain('transferencias');
+    expect(harness.routeNativeElement?.querySelector('h1')?.textContent).toContain(
+      'Transferir dinero',
+    );
   });
 
   it('redirects a CLIENT away from /accounts to their own safe route', async () => {
@@ -83,13 +104,19 @@ describe('routes', () => {
       providers: [
         provideRouter(routes),
         provideMockStore({
-          initialState: { auth: { ...initialAuthState, accessToken: 'a', user: clientUser } },
+          initialState: {
+            auth: { ...initialAuthState, accessToken: 'a', user: clientUser },
+            myAccount: initialMyAccountState,
+            transfer: initialTransferState,
+          },
         }),
       ],
     });
 
     const harness = await RouterTestingHarness.create('/accounts');
 
-    expect(harness.routeNativeElement?.querySelector('h1')?.textContent).toContain('transferencias');
+    expect(harness.routeNativeElement?.querySelector('h1')?.textContent).toContain(
+      'Transferir dinero',
+    );
   });
 });

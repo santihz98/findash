@@ -10,8 +10,12 @@ import { Store, provideState, provideStore } from '@ngrx/store';
 import { routes } from '../../app.routes';
 import { jwtInterceptor } from '../../core/interceptors/jwt.interceptor';
 import { TokenStorageService } from '../../core/services/token-storage.service';
+import { AccountsEffects } from '../../state/accounts/accounts.effects';
+import { accountsFeature } from '../../state/accounts/accounts.reducer';
 import { AuthEffects } from '../../state/auth/auth.effects';
 import { authFeature, selectError } from '../../state/auth/auth.reducer';
+import { myAccountFeature } from '../../state/myAccount/my-account.reducer';
+import { transferFeature } from '../../state/transfer/transfer.reducer';
 
 /**
  * Test de integración real (tarea 14): Store + AuthEffects + AuthService +
@@ -32,7 +36,15 @@ describe('login flow (integración real, backend fake)', () => {
         provideHttpClientTesting(),
         provideStore({}),
         provideState(authFeature),
-        provideEffects([AuthEffects]),
+        provideState(accountsFeature),
+        // myAccount/transfer se registran (sin sus effects, fuera de alcance
+        // de este test) solo para que TransferFormPage no crashee al montar
+        // tras el redirect del CLIENT — mismo motivo que accountsFeature ya
+        // documentaba desde la Sesión 14 ("Cannot read properties of
+        // undefined" sin el feature registrado).
+        provideState(myAccountFeature),
+        provideState(transferFeature),
+        provideEffects([AuthEffects, AccountsEffects]),
       ],
     });
     httpMock = TestBed.inject(HttpTestingController);
@@ -80,6 +92,16 @@ describe('login flow (integración real, backend fake)', () => {
     harness.detectChanges();
 
     expect(TestBed.inject(Router).url).toBe('/accounts');
+
+    // AccountListPage despacha loadAccounts al entrar (Sesión 14) — hace
+    // falta responder ese request también antes de poder afirmar sobre el
+    // DOM ya asentado.
+    httpMock
+      .expectOne((r) => r.url === 'accounts')
+      .flush({ data: [], page: 1, limit: 20, total: 0, totalPages: 0 });
+    await harness.fixture.whenStable();
+    harness.detectChanges();
+
     expect(harness.routeNativeElement?.querySelector('h1')?.textContent).toContain('Cuentas');
 
     const tokenStorage = TestBed.inject(TokenStorageService);
@@ -153,7 +175,7 @@ describe('login flow (integración real, backend fake)', () => {
 
     expect(TestBed.inject(Router).url).toBe('/transfer');
     expect(harness.routeNativeElement?.querySelector('h1')?.textContent).toContain(
-      'transferencias',
+      'Transferir dinero',
     );
   });
 });

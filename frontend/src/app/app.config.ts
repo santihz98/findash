@@ -9,8 +9,14 @@ import { routes } from './app.routes';
 import { provideAppConfigInitializer } from './core/config/config.initializer';
 import { apiConfigInterceptor } from './core/interceptors/api-config.interceptor';
 import { jwtInterceptor } from './core/interceptors/jwt.interceptor';
+import { AccountsEffects } from './state/accounts/accounts.effects';
+import { accountsFeature } from './state/accounts/accounts.reducer';
 import { AuthEffects } from './state/auth/auth.effects';
 import { authFeature } from './state/auth/auth.reducer';
+import { MyAccountEffects } from './state/myAccount/my-account.effects';
+import { myAccountFeature } from './state/myAccount/my-account.reducer';
+import { TransferEffects } from './state/transfer/transfer.effects';
+import { transferFeature } from './state/transfer/transfer.reducer';
 
 export const appConfig: ApplicationConfig = {
   providers: [
@@ -26,7 +32,10 @@ export const appConfig: ApplicationConfig = {
     // Store raíz vacío — los features se registran cada uno en state/.
     provideStore({}),
     provideState(authFeature),
-    provideEffects([AuthEffects]),
+    provideState(accountsFeature),
+    provideState(myAccountFeature),
+    provideState(transferFeature),
+    provideEffects([AuthEffects, AccountsEffects, MyAccountEffects, TransferEffects]),
     provideStoreDevtools({ maxAge: 25, logOnly: !isDevMode() }),
   ],
 };
