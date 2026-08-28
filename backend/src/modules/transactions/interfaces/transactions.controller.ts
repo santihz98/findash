@@ -135,7 +135,8 @@ export class TransactionsController {
   @ApiOperation({
     summary: 'Historial de movimientos de la cuenta del usuario autenticado, paginado (solo CLIENT)',
     description:
-      'Incluye transacciones enviadas Y recibidas (campo `direction`: "SENT"/"RECEIVED", relativo a la cuenta consultada) — no solo las que el usuario originó. Incluye también intentos fallidos/rechazados (`status`: REJECTED/FAILED), no solo COMPLETED, para que el usuario vea igualmente sus intentos sin éxito.',
+      'Incluye transacciones enviadas Y recibidas (campo `direction`: "SENT"/"RECEIVED", relativo a la cuenta consultada) — no solo las que el usuario originó. Incluye también intentos fallidos/rechazados (`status`: REJECTED/FAILED), no solo COMPLETED, para que el usuario vea igualmente sus intentos sin éxito. ' +
+      'Sesión 26: cada fila trae `counterpartyAccount` (accountNumber/accountType de la cuenta que NO es la propia — `null` cuando esa cuenta no está confirmada, ej. un intento FAILED por timeout de anti-fraude, mismo criterio que `destAccountId` desde la Sesión 6.5). NUNCA incluye email ni documentNumber del titular de esa cuenta — mismo criterio de privacidad que `GET /accounts/lookup` (un CLIENT puede saber CON QUÉ TIPO de cuenta operó, nunca QUIÉN es la persona detrás).',
   })
   @ApiResponse({
     status: 200,
@@ -153,11 +154,24 @@ export class TransactionsController {
             status: 'COMPLETED',
             createdAt: '2026-08-27T16:05:41.540Z',
             direction: 'SENT',
+            counterpartyAccount: { accountNumber: '1000000002', accountType: 'PREMIUM' },
+          },
+          {
+            id: '7c1e2f3a-88b1-4a2d-9e3f-1234567890ab',
+            originAccountId: '57d1b569-5127-44d7-b464-2e6a2a2ef17b',
+            destAccountId: null,
+            amount: '9999.00',
+            commission: null,
+            authorizationCode: null,
+            status: 'FAILED',
+            createdAt: '2026-08-27T15:00:00.000Z',
+            direction: 'SENT',
+            counterpartyAccount: null,
           },
         ],
         page: 1,
         limit: 20,
-        total: 1,
+        total: 2,
         totalPages: 1,
       },
     },
@@ -185,7 +199,8 @@ export class TransactionsController {
   @ApiOperation({
     summary: 'Lista TODAS las transacciones de la plataforma, paginado, filtrable por status y/o rango de fechas (solo ADMIN)',
     description:
-      'A diferencia de GET /transactions/me, no está scopeado a ninguna cuenta — es la vista de auditoría. `dateFrom`/`dateTo` filtran sobre `createdAt` y son combinables entre sí y con `status`.',
+      'A diferencia de GET /transactions/me, no está scopeado a ninguna cuenta — es la vista de auditoría. `dateFrom`/`dateTo` filtran sobre `createdAt` y son combinables entre sí y con `status`. ' +
+      'Sesión 26: cada fila trae `originAccount` (siempre presente) y `destAccount` (`null` cuando el destino no está confirmado — mismo criterio ya establecido desde la Sesión 6.5 para filas REJECTED/FAILED), cada uno con `accountNumber`/`accountType` Y los datos del titular (`ownerEmail`/`ownerDocumentNumber`). No es información nueva: el ADMIN ya tiene acceso a esos mismos datos vía GET /accounts — esto los une en un solo request en vez de tener que cruzar dos.',
   })
   @ApiResponse({
     status: 200,
@@ -202,11 +217,40 @@ export class TransactionsController {
             authorizationCode: '36211CC2A6FD',
             status: 'COMPLETED',
             createdAt: '2026-08-27T16:05:41.540Z',
+            originAccount: {
+              accountNumber: '1000000001',
+              accountType: 'BASIC',
+              ownerEmail: 'basic@findash.dev',
+              ownerDocumentNumber: '1010000002',
+            },
+            destAccount: {
+              accountNumber: '1000000002',
+              accountType: 'PREMIUM',
+              ownerEmail: 'premium@findash.dev',
+              ownerDocumentNumber: '1010000003',
+            },
+          },
+          {
+            id: '7c1e2f3a-88b1-4a2d-9e3f-1234567890ab',
+            originAccountId: '57d1b569-5127-44d7-b464-2e6a2a2ef17b',
+            destAccountId: null,
+            amount: '9999.00',
+            commission: null,
+            authorizationCode: null,
+            status: 'FAILED',
+            createdAt: '2026-08-27T15:00:00.000Z',
+            originAccount: {
+              accountNumber: '1000000001',
+              accountType: 'BASIC',
+              ownerEmail: 'basic@findash.dev',
+              ownerDocumentNumber: '1010000002',
+            },
+            destAccount: null,
           },
         ],
         page: 1,
         limit: 20,
-        total: 1,
+        total: 2,
         totalPages: 1,
       },
     },

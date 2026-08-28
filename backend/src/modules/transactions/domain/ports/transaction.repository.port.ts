@@ -1,5 +1,9 @@
 import { Prisma, TransactionStatus } from '@prisma/client';
-import { Transaction, TransactionWithDirection } from '../entities/transaction.entity';
+import {
+  Transaction,
+  TransactionWithAccounts,
+  TransactionWithCounterparty,
+} from '../entities/transaction.entity';
 import { TransactionContext } from '../../../../shared/database/transaction-context';
 
 export interface CreateTransactionData {
@@ -86,15 +90,31 @@ export interface ITransactionRepository {
   /** RF-02 (Sesión 17) — `GET /transactions/me`: todas las filas donde
    * `accountId` es origen O destino (no solo las enviadas), con `direction`
    * calculada relativa a esa cuenta. Incluye REJECTED/FAILED — el CLIENT
-   * también debe ver sus intentos fallidos, no solo los COMPLETED. */
+   * también debe ver sus intentos fallidos, no solo los COMPLETED.
+   *
+   * Sesión 26: además enriquecida con `counterpartyAccount` (accountNumber/
+   * accountType de la cuenta que NO es la propia, `null` cuando esa cuenta
+   * no está confirmada — mismo criterio ya establecido para `destAccountId`
+   * desde la Sesión 6.5). Vía `include` relacional de Prisma sobre
+   * `originAccount`/`destAccount` — una sola query, sin N+1. NUNCA incluye
+   * `email`/`documentNumber` del titular de esa cuenta — mismo criterio de
+   * privacidad que `GET /accounts/lookup` (Sesión 19). */
   findManyByAccountId(
     filter: ListTransactionsByAccountFilter,
-  ): Promise<PaginatedTransactions<TransactionWithDirection>>;
+  ): Promise<PaginatedTransactions<TransactionWithCounterparty>>;
 
   /** RF-02 (Sesión 17) — `GET /transactions` (solo ADMIN): TODAS las
    * transacciones de la plataforma, sin scope de cuenta, filtrables por
-   * status y/o rango de fechas. */
-  findManyAdmin(filter: ListTransactionsAdminFilter): Promise<PaginatedTransactions<Transaction>>;
+   * status y/o rango de fechas.
+   *
+   * Sesión 26: enriquecida con `originAccount` (siempre presente) y
+   * `destAccount` (`null` en el mismo criterio ya establecido desde la
+   * Sesión 6.5), cada uno con accountNumber/accountType Y datos del titular
+   * (email/documentNumber) — el ADMIN ya tiene acceso a esos mismos datos
+   * vía `GET /accounts` (Sesión 3), esto solo los une en un solo request.
+   * Vía `include` relacional de Prisma sobre `originAccount`/`destAccount`
+   * -> `User`, una sola query, sin N+1. */
+  findManyAdmin(filter: ListTransactionsAdminFilter): Promise<PaginatedTransactions<TransactionWithAccounts>>;
 }
 
 export const TRANSACTION_REPOSITORY = Symbol('TRANSACTION_REPOSITORY');

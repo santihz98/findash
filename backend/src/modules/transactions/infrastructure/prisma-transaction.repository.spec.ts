@@ -369,4 +369,168 @@ describe('PrismaTransactionRepository (integración real contra Postgres)', () =
       ]);
     });
   });
+
+  // Sesión 26: enriquecimiento de cuentas vía `include` relacional real
+  // (Transaction -> originAccount/destAccount [-> User]) — join real contra
+  // Postgres, no un fake que por casualidad no rompe nada. Usuarios propios
+  // (distintos de `userId` de arriba) para que origen y destino tengan
+  // titulares realmente distintos y el mapeo no pueda "acertar por
+  // casualidad" con un solo usuario en ambos lados.
+  describe('enriquecimiento con datos de cuenta/titular (Sesión 26)', () => {
+    let enrichOriginUserId: string;
+    let enrichDestUserId: string;
+    let enrichOriginAccountId: string;
+    let enrichDestAccountId: string;
+
+    beforeAll(async () => {
+      const originUser = await prisma.user.create({
+        data: {
+          email: 'txrepotest-enrich-origin@findash.dev',
+          documentNumber: 'TXREPOTEST-DOC-ENRICH-O',
+          passwordHash: 'irrelevant-for-this-test',
+          role: 'CLIENT',
+        },
+      });
+      enrichOriginUserId = originUser.id;
+      const originAccount = await prisma.account.create({
+        data: {
+          userId: originUser.id,
+          accountNumber: 'TXREPOTEST-ACC-ENRICH-O',
+          balance: '1000.00',
+          accountType: AccountType.BASIC,
+          status: 'ACTIVE',
+        },
+      });
+      enrichOriginAccountId = originAccount.id;
+
+      const destUser = await prisma.user.create({
+        data: {
+          email: 'txrepotest-enrich-dest@findash.dev',
+          documentNumber: 'TXREPOTEST-DOC-ENRICH-D',
+          passwordHash: 'irrelevant-for-this-test',
+          role: 'CLIENT',
+        },
+      });
+      enrichDestUserId = destUser.id;
+      const destAccount = await prisma.account.create({
+        data: {
+          userId: destUser.id,
+          accountNumber: 'TXREPOTEST-ACC-ENRICH-D',
+          balance: '0.00',
+          accountType: AccountType.PREMIUM,
+          status: 'ACTIVE',
+        },
+      });
+      enrichDestAccountId = destAccount.id;
+    });
+
+    afterAll(async () => {
+      await prisma.transaction.deleteMany({ where: { originAccountId: enrichOriginAccountId } });
+      await prisma.account.deleteMany({ where: { userId: { in: [enrichOriginUserId, enrichDestUserId] } } });
+      await prisma.user.deleteMany({ where: { id: { in: [enrichOriginUserId, enrichDestUserId] } } });
+    });
+
+    it('findManyAdmin: trae originAccount (siempre) y destAccount (con email/documentNumber reales) vía un solo JOIN', async () => {
+      const completed = await repository.create({
+        originAccountId: enrichOriginAccountId,
+        destAccountId: enrichDestAccountId,
+        amount: new Prisma.Decimal('33.00'),
+        commission: new Prisma.Decimal('0.66'),
+        authorizationCode: 'TXREPOTEST-ENRICH-ADMIN01',
+        idempotencyKey: 'txrepotest-enrich-admin-key-1',
+        status: 'COMPLETED',
+      });
+      const failed = await repository.create({
+        originAccountId: enrichOriginAccountId,
+        destAccountId: null,
+        amount: new Prisma.Decimal('999.00'),
+        commission: null,
+        authorizationCode: null,
+        idempotencyKey: null,
+        status: 'FAILED',
+      });
+
+      const result = await repository.findManyAdmin({ page: 1, limit: 200 });
+
+      const completedRow = result.data.find((t) => t.id === completed.id)!;
+      expect(completedRow.originAccount).toEqual({
+        accountNumber: 'TXREPOTEST-ACC-ENRICH-O',
+        accountType: AccountType.BASIC,
+        ownerEmail: 'txrepotest-enrich-origin@findash.dev',
+        ownerDocumentNumber: 'TXREPOTEST-DOC-ENRICH-O',
+      });
+      expect(completedRow.destAccount).toEqual({
+        accountNumber: 'TXREPOTEST-ACC-ENRICH-D',
+        accountType: AccountType.PREMIUM,
+        ownerEmail: 'txrepotest-enrich-dest@findash.dev',
+        ownerDocumentNumber: 'TXREPOTEST-DOC-ENRICH-D',
+      });
+
+      // FAILED con destAccountId NULL (Sesión 6.5): destAccount debe ser
+      // `null`, no un objeto con campos vacíos/undefined.
+      const failedRow = result.data.find((t) => t.id === failed.id)!;
+      expect(failedRow.destAccount).toBeNull();
+      expect(failedRow.originAccount.accountNumber).toBe('TXREPOTEST-ACC-ENRICH-O');
+    });
+
+    it('findManyByAccountId: trae counterpartyAccount (accountNumber/accountType), NUNCA email/documentNumber de la contraparte', async () => {
+      const sent = await repository.create({
+        originAccountId: enrichOriginAccountId,
+        destAccountId: enrichDestAccountId,
+        amount: new Prisma.Decimal('44.00'),
+        commission: new Prisma.Decimal('0.88'),
+        authorizationCode: 'TXREPOTEST-ENRICH-ME01',
+        idempotencyKey: 'txrepotest-enrich-me-key-1',
+        status: 'COMPLETED',
+      });
+      const failed = await repository.create({
+        originAccountId: enrichOriginAccountId,
+        destAccountId: null,
+        amount: new Prisma.Decimal('777.00'),
+        commission: null,
+        authorizationCode: null,
+        idempotencyKey: null,
+        status: 'FAILED',
+      });
+
+      const fromOrigin = await repository.findManyByAccountId({
+        accountId: enrichOriginAccountId,
+        page: 1,
+        limit: 200,
+      });
+
+      const sentRow = fromOrigin.data.find((t) => t.id === sent.id)!;
+      expect(sentRow.direction).toBe('SENT');
+      expect(sentRow.counterpartyAccount).toEqual({
+        accountNumber: 'TXREPOTEST-ACC-ENRICH-D',
+        accountType: AccountType.PREMIUM,
+      });
+      // Test explícito de "campos ausentes" (mismo criterio que
+      // accounts/lookup, Sesión 19) — no solo que los presentes sean
+      // correctos, sino que email/documentNumber NUNCA estén ahí.
+      expect(Object.keys(sentRow.counterpartyAccount!).sort()).toEqual(['accountNumber', 'accountType']);
+      expect(sentRow.counterpartyAccount).not.toHaveProperty('ownerEmail');
+      expect(sentRow.counterpartyAccount).not.toHaveProperty('ownerDocumentNumber');
+
+      const failedRow = fromOrigin.data.find((t) => t.id === failed.id)!;
+      expect(failedRow.direction).toBe('SENT');
+      expect(failedRow.counterpartyAccount).toBeNull();
+
+      // Vista desde la cuenta destino: misma fila, direction RECEIVED,
+      // counterpartyAccount = la cuenta origen (siempre presente, FK NOT
+      // NULL) — también sin ningún dato del titular.
+      const fromDest = await repository.findManyByAccountId({
+        accountId: enrichDestAccountId,
+        page: 1,
+        limit: 200,
+      });
+      const receivedRow = fromDest.data.find((t) => t.id === sent.id)!;
+      expect(receivedRow.direction).toBe('RECEIVED');
+      expect(receivedRow.counterpartyAccount).toEqual({
+        accountNumber: 'TXREPOTEST-ACC-ENRICH-O',
+        accountType: AccountType.BASIC,
+      });
+      expect(Object.keys(receivedRow.counterpartyAccount!).sort()).toEqual(['accountNumber', 'accountType']);
+    });
+  });
 });

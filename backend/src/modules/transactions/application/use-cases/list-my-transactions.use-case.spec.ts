@@ -4,7 +4,7 @@ import { IAccountRepository } from '../../../accounts/domain/ports/account.repos
 import { ITransactionRepository } from '../../domain/ports/transaction.repository.port';
 import { Account } from '../../../accounts/domain/entities/account.entity';
 import { NoOriginAccountException } from '../../domain/exceptions/no-origin-account.exception';
-import { TransactionWithDirection } from '../../domain/entities/transaction.entity';
+import { TransactionWithCounterparty } from '../../domain/entities/transaction.entity';
 
 function makeAccount(overrides: Partial<Account> = {}): Account {
   return {
@@ -18,7 +18,7 @@ function makeAccount(overrides: Partial<Account> = {}): Account {
   };
 }
 
-function makeTx(overrides: Partial<TransactionWithDirection> = {}): TransactionWithDirection {
+function makeTx(overrides: Partial<TransactionWithCounterparty> = {}): TransactionWithCounterparty {
   return {
     id: 'tx-1',
     originAccountId: 'acc-1',
@@ -29,6 +29,7 @@ function makeTx(overrides: Partial<TransactionWithDirection> = {}): TransactionW
     status: TransactionStatus.COMPLETED,
     createdAt: new Date('2026-08-27T00:00:00.000Z'),
     direction: 'SENT',
+    counterpartyAccount: { accountNumber: '1000000002', accountType: AccountType.PREMIUM },
     ...overrides,
   };
 }

@@ -9,12 +9,34 @@ import {
   ListTransactionsByAccountFilter,
   PaginatedTransactions,
 } from '../domain/ports/transaction.repository.port';
-import { Transaction, TransactionWithDirection } from '../domain/entities/transaction.entity';
+import { Transaction, TransactionWithAccounts, TransactionWithCounterparty } from '../domain/entities/transaction.entity';
 
 /** Forma cruda de una fila `transactions` tal como la devuelve Prisma
  * (`amount`/`commission` todavía `Prisma.Decimal`, no `string`) — el shape
  * que comparten `create`, `findUnique` y `findMany` de este modelo. */
 type TransactionRow = Prisma.TransactionGetPayload<Record<string, never>>;
+
+/** Sesión 26 — fila de `findManyByAccountId` (GET /transactions/me) con
+ * ambas cuentas incluidas SOLO por accountNumber/accountType (nunca `user`)
+ * — el `select` explícito, no `include` completo, es defensa en profundidad
+ * más allá de que el mapeo tampoco copiaría email/documentNumber al DTO. */
+const COUNTERPARTY_ACCOUNT_SELECT = { accountNumber: true, accountType: true } as const;
+type TransactionRowWithCounterpartyAccounts = Prisma.TransactionGetPayload<{
+  include: {
+    originAccount: { select: typeof COUNTERPARTY_ACCOUNT_SELECT };
+    destAccount: { select: typeof COUNTERPARTY_ACCOUNT_SELECT };
+  };
+}>;
+
+/** Sesión 26 — fila de `findManyAdmin` (GET /transactions) con ambas
+ * cuentas Y su titular incluidos — justificado en TransactionAccountInfoWithOwner. */
+const ACCOUNT_WITH_OWNER_INCLUDE = { user: { select: { email: true, documentNumber: true } } } as const;
+type TransactionRowWithOwnerAccounts = Prisma.TransactionGetPayload<{
+  include: {
+    originAccount: { include: typeof ACCOUNT_WITH_OWNER_INCLUDE };
+    destAccount: { include: typeof ACCOUNT_WITH_OWNER_INCLUDE };
+  };
+}>;
 
 @Injectable()
 export class PrismaTransactionRepository implements ITransactionRepository {
@@ -60,7 +82,7 @@ export class PrismaTransactionRepository implements ITransactionRepository {
   // consistente con el mismo `where`, sin dos round-trips no atómicos.
   async findManyByAccountId(
     filter: ListTransactionsByAccountFilter,
-  ): Promise<PaginatedTransactions<TransactionWithDirection>> {
+  ): Promise<PaginatedTransactions<TransactionWithCounterparty>> {
     const where: Prisma.TransactionWhereInput = {
       OR: [{ originAccountId: filter.accountId }, { destAccountId: filter.accountId }],
     };
@@ -83,18 +105,39 @@ export class PrismaTransactionRepository implements ITransactionRepository {
         // primario, así que el desempate usa la PK en vez de reemplazar el
         // criterio principal.
         orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+        // Sesión 26: `include` relacional (Transaction -> originAccount/
+        // destAccount, ambas relaciones ya existentes en el schema), no
+        // queries separadas — una sola query, sin N+1. `select` explícito
+        // de solo accountNumber/accountType (nunca `user`) — el CLIENT NUNCA
+        // debe ver email/documentNumber de la contraparte (mismo criterio
+        // que GET /accounts/lookup, Sesión 19).
+        include: {
+          originAccount: { select: COUNTERPARTY_ACCOUNT_SELECT },
+          destAccount: { select: COUNTERPARTY_ACCOUNT_SELECT },
+        },
       }),
       this.prisma.transaction.count({ where }),
     ]);
 
     return {
-      data: rows.map((row) => ({
-        ...this.toEntity(row),
+      data: rows.map((row: TransactionRowWithCounterpartyAccounts) => {
         // 'SENT' si esta cuenta es el origen (cubre también el caso límite
         // de un self-transfer REJECTED donde origen == destino) — 'RECEIVED'
         // solo puede darse cuando el origen es OTRA cuenta real.
-        direction: row.originAccountId === filter.accountId ? 'SENT' : ('RECEIVED' as const),
-      })),
+        const direction = row.originAccountId === filter.accountId ? 'SENT' : ('RECEIVED' as const);
+        // Contraparte = la cuenta que NO es `filter.accountId`. Si soy el
+        // origen (SENT), la contraparte es destAccount (puede ser `null` —
+        // mismo criterio que destAccountId desde la Sesión 6.5). Si soy el
+        // destino (RECEIVED), la contraparte es originAccount, que SIEMPRE
+        // existe (FK NOT NULL) — nunca `null` en ese caso.
+        const counterpartyAccount = direction === 'SENT' ? row.destAccount : row.originAccount;
+
+        return {
+          ...this.toEntity(row),
+          direction,
+          counterpartyAccount,
+        };
+      }),
       total,
     };
   }
@@ -102,7 +145,7 @@ export class PrismaTransactionRepository implements ITransactionRepository {
   // RF-02 (Sesión 17) — GET /transactions (solo ADMIN, auditoría): sin
   // scope de cuenta, filtros opcionales combinables por status y por rango
   // de fechas sobre `createdAt`.
-  async findManyAdmin(filter: ListTransactionsAdminFilter): Promise<PaginatedTransactions<Transaction>> {
+  async findManyAdmin(filter: ListTransactionsAdminFilter): Promise<PaginatedTransactions<TransactionWithAccounts>> {
     const where: Prisma.TransactionWhereInput = {
       ...(filter.status ? { status: filter.status } : {}),
       ...(filter.dateFrom || filter.dateTo
@@ -124,11 +167,40 @@ export class PrismaTransactionRepository implements ITransactionRepository {
         // mismo motivo: desempate determinístico con `id` sobre un
         // `createdAt` no-único).
         orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+        // Sesión 26: `include` relacional anidado (Transaction ->
+        // originAccount/destAccount -> User) — una sola query, sin N+1. El
+        // ADMIN ya tenía acceso a email/documentNumber vía GET /accounts
+        // (Sesión 3); acá se traen en el mismo request de auditoría.
+        include: {
+          originAccount: { include: ACCOUNT_WITH_OWNER_INCLUDE },
+          destAccount: { include: ACCOUNT_WITH_OWNER_INCLUDE },
+        },
       }),
       this.prisma.transaction.count({ where }),
     ]);
 
-    return { data: rows.map((row) => this.toEntity(row)), total };
+    return {
+      data: rows.map((row: TransactionRowWithOwnerAccounts) => ({
+        ...this.toEntity(row),
+        originAccount: {
+          accountNumber: row.originAccount.accountNumber,
+          accountType: row.originAccount.accountType,
+          ownerEmail: row.originAccount.user.email,
+          ownerDocumentNumber: row.originAccount.user.documentNumber,
+        },
+        // `null` en el mismo criterio ya establecido para destAccountId
+        // desde la Sesión 6.5 (REJECTED/FAILED sin destino confirmado).
+        destAccount: row.destAccount
+          ? {
+              accountNumber: row.destAccount.accountNumber,
+              accountType: row.destAccount.accountType,
+              ownerEmail: row.destAccount.user.email,
+              ownerDocumentNumber: row.destAccount.user.documentNumber,
+            }
+          : null,
+      })),
+      total,
+    };
   }
 
   /** Mapeo Prisma -> entidad de dominio compartido por `create`/`findById`/

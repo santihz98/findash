@@ -20,7 +20,13 @@ import {
   PaginatedTransactions,
   TRANSACTION_REPOSITORY,
 } from '../domain/ports/transaction.repository.port';
-import { Transaction, TransactionWithDirection } from '../domain/entities/transaction.entity';
+import {
+  Transaction,
+  TransactionAccountInfo,
+  TransactionAccountInfoWithOwner,
+  TransactionWithAccounts,
+  TransactionWithCounterparty,
+} from '../domain/entities/transaction.entity';
 import {
   IDEMPOTENCY_KEY_REPOSITORY,
   IIdempotencyKeyRepository,
@@ -42,8 +48,14 @@ class FakeUserRepository implements IUserRepository {
   }
 }
 
+// ownerEmail/ownerDocumentNumber (Sesión 26): denormalizados acá a
+// propósito — este fake simula lo que en Postgres real es un JOIN
+// Account -> User (ver PrismaTransactionRepository.findManyAdmin), y este
+// archivo no tiene una tabla `users` real contra la cual resolverlo.
 interface FakeAccountRow extends Account {
   userId: string;
+  ownerEmail: string;
+  ownerDocumentNumber: string;
 }
 
 // Fake que de verdad guarda estado mutable (balances) — así se puede
@@ -97,6 +109,27 @@ class FakeTransactionRepository implements ITransactionRepository {
   public created: CreateTransactionData[] = [];
   private byId = new Map<string, Transaction>();
 
+  // Sesión 26: recibe la MISMA lista de cuentas que FakeAccountRepository —
+  // simula el JOIN Transaction -> Account [-> User] que hace la
+  // implementación real de Prisma vía `include`.
+  constructor(private readonly accounts: FakeAccountRow[]) {}
+
+  private accountInfoWithOwner(accountId: string): TransactionAccountInfoWithOwner {
+    const row = this.accounts.find((a) => a.id === accountId);
+    if (!row) throw new Error(`FakeTransactionRepository: cuenta no encontrada en el fake: ${accountId}`);
+    return {
+      accountNumber: row.accountNumber,
+      accountType: row.accountType,
+      ownerEmail: row.ownerEmail,
+      ownerDocumentNumber: row.ownerDocumentNumber,
+    };
+  }
+
+  private accountInfo(accountId: string): TransactionAccountInfo {
+    const { accountNumber, accountType } = this.accountInfoWithOwner(accountId);
+    return { accountNumber, accountType };
+  }
+
   runInTransaction<T>(fn: (trx: unknown) => Promise<T>): Promise<T> {
     return fn('fake-trx');
   }
@@ -127,29 +160,39 @@ class FakeTransactionRepository implements ITransactionRepository {
   // guards/roles/aislamiento entre usuarios.
   async findManyByAccountId(
     filter: ListTransactionsByAccountFilter,
-  ): Promise<PaginatedTransactions<TransactionWithDirection>> {
+  ): Promise<PaginatedTransactions<TransactionWithCounterparty>> {
     const all = Array.from(this.byId.values())
       .filter((t) => t.originAccountId === filter.accountId || t.destAccountId === filter.accountId)
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
     const total = all.length;
     const start = (filter.page - 1) * filter.limit;
-    const data = all.slice(start, start + filter.limit).map(
-      (t): TransactionWithDirection => ({
+    const data = all.slice(start, start + filter.limit).map((t): TransactionWithCounterparty => {
+      const direction = t.originAccountId === filter.accountId ? 'SENT' : ('RECEIVED' as const);
+      const counterpartyId = direction === 'SENT' ? t.destAccountId : t.originAccountId;
+      return {
         ...t,
-        direction: t.originAccountId === filter.accountId ? 'SENT' : 'RECEIVED',
-      }),
-    );
+        direction,
+        counterpartyAccount: counterpartyId ? this.accountInfo(counterpartyId) : null,
+      };
+    });
     return { data, total };
   }
 
-  async findManyAdmin(filter: ListTransactionsAdminFilter): Promise<PaginatedTransactions<Transaction>> {
+  async findManyAdmin(filter: ListTransactionsAdminFilter): Promise<PaginatedTransactions<TransactionWithAccounts>> {
     let all = Array.from(this.byId.values()).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
     if (filter.status) all = all.filter((t) => t.status === filter.status);
     if (filter.dateFrom) all = all.filter((t) => t.createdAt >= filter.dateFrom!);
     if (filter.dateTo) all = all.filter((t) => t.createdAt <= filter.dateTo!);
     const total = all.length;
     const start = (filter.page - 1) * filter.limit;
-    return { data: all.slice(start, start + filter.limit), total };
+    const data = all.slice(start, start + filter.limit).map(
+      (t): TransactionWithAccounts => ({
+        ...t,
+        originAccount: this.accountInfoWithOwner(t.originAccountId),
+        destAccount: t.destAccountId ? this.accountInfoWithOwner(t.destAccountId) : null,
+      }),
+    );
+    return { data, total };
   }
 }
 
@@ -242,7 +285,7 @@ describe('Transactions (integración): guards, roles, y "no desde una cuenta aje
       role: Role.CLIENT,
     };
 
-    accountRepo = new FakeAccountRepository([
+    const accountRows: FakeAccountRow[] = [
       {
         id: ACCOUNT_CLIENT1,
         userId: client1.id,
@@ -251,6 +294,8 @@ describe('Transactions (integración): guards, roles, y "no desde una cuenta aje
         accountType: AccountType.BASIC,
         status: AccountStatus.ACTIVE,
         avatarUrl: null,
+        ownerEmail: client1.email,
+        ownerDocumentNumber: client1.documentNumber,
       },
       {
         id: ACCOUNT_CLIENT2,
@@ -260,6 +305,8 @@ describe('Transactions (integración): guards, roles, y "no desde una cuenta aje
         accountType: AccountType.PREMIUM,
         status: AccountStatus.ACTIVE,
         avatarUrl: null,
+        ownerEmail: client2.email,
+        ownerDocumentNumber: client2.documentNumber,
       },
       {
         id: ACCOUNT_CLIENT3,
@@ -269,9 +316,12 @@ describe('Transactions (integración): guards, roles, y "no desde una cuenta aje
         accountType: AccountType.BASIC,
         status: AccountStatus.ACTIVE,
         avatarUrl: null,
+        ownerEmail: client3.email,
+        ownerDocumentNumber: client3.documentNumber,
       },
-    ]);
-    txRepo = new FakeTransactionRepository();
+    ];
+    accountRepo = new FakeAccountRepository(accountRows);
+    txRepo = new FakeTransactionRepository(accountRows);
 
     const moduleRef = await Test.createTestingModule({
       imports: [
@@ -483,6 +533,18 @@ describe('Transactions (integración): guards, roles, y "no desde una cuenta aje
         idempotencyKey: 'me-test-noise-key-1',
         status: TransactionStatus.COMPLETED,
       });
+      // client3 -> ???, FAILED por timeout de anti-fraude (Sesión 6.5):
+      // destAccountId NULL porque el destino nunca se confirmó — el caso
+      // real donde counterpartyAccount debe salir `null` (Sesión 26).
+      await txRepo.create({
+        originAccountId: ACCOUNT_CLIENT3,
+        destAccountId: null,
+        amount: new Prisma.Decimal('15.00'),
+        commission: null,
+        authorizationCode: null,
+        idempotencyKey: null,
+        status: TransactionStatus.FAILED,
+      });
     });
 
     it('devuelve enviadas Y recibidas con direction correcto, incluidos intentos REJECTED, sin las de otras cuentas', async () => {
@@ -493,20 +555,41 @@ describe('Transactions (integración): guards, roles, y "no desde una cuenta aje
         .set('Authorization', `Bearer ${token}`)
         .expect(200);
 
-      expect(res.body).toMatchObject({ page: 1, limit: 20, total: 4, totalPages: 1 });
+      expect(res.body).toMatchObject({ page: 1, limit: 20, total: 5, totalPages: 1 });
       const rows = res.body.data as Array<Record<string, unknown>>;
-      expect(rows).toHaveLength(4);
+      expect(rows).toHaveLength(5);
       expect(rows.every((t) => t.originAccountId === ACCOUNT_CLIENT3 || t.destAccountId === ACCOUNT_CLIENT3)).toBe(
         true,
       );
-      expect(rows.some((t) => t.authorizationCode === 'ME-TEST-SENT01' && t.direction === 'SENT')).toBe(true);
-      expect(rows.some((t) => t.authorizationCode === 'ME-TEST-RECV01' && t.direction === 'RECEIVED')).toBe(true);
+      const sentRow = rows.find((t) => t.authorizationCode === 'ME-TEST-SENT01')!;
+      expect(sentRow.direction).toBe('SENT');
+      // Sesión 26: counterpartyAccount = la cuenta de client1 (destino de este
+      // envío) — accountNumber/accountType, NUNCA email/documentNumber.
+      expect(sentRow.counterpartyAccount).toEqual({ accountNumber: '1000000001', accountType: 'BASIC' });
+      expect(sentRow.counterpartyAccount).not.toHaveProperty('ownerEmail');
+      expect(sentRow.counterpartyAccount).not.toHaveProperty('ownerDocumentNumber');
+      expect(Object.keys(sentRow.counterpartyAccount as object).sort()).toEqual(['accountNumber', 'accountType']);
+
+      const recvRow = rows.find((t) => t.authorizationCode === 'ME-TEST-RECV01')!;
+      expect(recvRow.direction).toBe('RECEIVED');
+      // Contraparte de una fila RECEIVED es el origen (client1) — mismo
+      // criterio de campos, mismo test de ausencia.
+      expect(recvRow.counterpartyAccount).toEqual({ accountNumber: '1000000001', accountType: 'BASIC' });
+
       expect(rows.some((t) => t.status === 'REJECTED' && t.direction === 'SENT' && t.amount === '9999.00')).toBe(
         true,
       );
       expect(rows.some((t) => t.authorizationCode === 'ME-TEST-EXCLUSIVE01')).toBe(true);
       // Nunca la fila de ruido entre client1 y client2 — client3 no participa.
       expect(rows.some((t) => t.authorizationCode === 'ME-TEST-NOISE01')).toBe(false);
+
+      // FAILED con destAccountId NULL (timeout de anti-fraude, Sesión 6.5):
+      // counterpartyAccount debe ser `null`, no un objeto a medias — mismo
+      // criterio ya establecido para destAccountId.
+      const failedRow = rows.find((t) => t.status === 'FAILED')!;
+      expect(failedRow.direction).toBe('SENT');
+      expect(failedRow.destAccountId).toBeNull();
+      expect(failedRow.counterpartyAccount).toBeNull();
     });
 
     it('un CLIENT nunca ve transacciones ajenas, ni inyectando params extra que no son parte del DTO', async () => {
@@ -542,8 +625,8 @@ describe('Transactions (integración): guards, roles, y "no desde una cuenta aje
         .set('Authorization', `Bearer ${token}`)
         .expect(200);
 
-      expect(page1.body).toMatchObject({ page: 1, limit: 1, total: 4, totalPages: 4 });
-      expect(page2.body).toMatchObject({ page: 2, limit: 1, total: 4, totalPages: 4 });
+      expect(page1.body).toMatchObject({ page: 1, limit: 1, total: 5, totalPages: 5 });
+      expect(page2.body).toMatchObject({ page: 2, limit: 1, total: 5, totalPages: 5 });
       expect(page1.body.data).toHaveLength(1);
       expect(page2.body.data).toHaveLength(1);
       expect(page1.body.data[0].id).not.toBe(page2.body.data[0].id);
@@ -569,10 +652,33 @@ describe('Transactions (integración): guards, roles, y "no desde una cuenta aje
         .set('Authorization', `Bearer ${token}`)
         .expect(200);
 
-      const codes = (res.body.data as Array<Record<string, unknown>>).map((t) => t.authorizationCode);
+      const rows = res.body.data as Array<Record<string, unknown>>;
+      const codes = rows.map((t) => t.authorizationCode);
       expect(codes).toEqual(
         expect.arrayContaining(['ME-TEST-SENT01', 'ME-TEST-RECV01', 'ME-TEST-EXCLUSIVE01', 'ME-TEST-NOISE01']),
       );
+
+      // Sesión 26: originAccount SIEMPRE presente, con accountNumber/
+      // accountType Y datos del titular (el ADMIN ya los ve en GET /accounts).
+      const sentRow = rows.find((t) => t.authorizationCode === 'ME-TEST-SENT01')! as { originAccount: Record<string, unknown>; destAccount: Record<string, unknown> };
+      expect(sentRow.originAccount).toEqual({
+        accountNumber: '1000000003',
+        accountType: 'BASIC',
+        ownerEmail: client3.email,
+        ownerDocumentNumber: client3.documentNumber,
+      });
+      expect(sentRow.destAccount).toEqual({
+        accountNumber: '1000000001',
+        accountType: 'BASIC',
+        ownerEmail: client1.email,
+        ownerDocumentNumber: client1.documentNumber,
+      });
+
+      // FAILED con destAccountId NULL: destAccount debe ser `null`, mismo
+      // criterio ya establecido para destAccountId desde la Sesión 6.5.
+      const failedRow = rows.find((t) => t.status === 'FAILED')!;
+      expect(failedRow.destAccount).toBeNull();
+      expect(failedRow.originAccount).toBeTruthy();
     });
 
     it('GET /transactions rechaza con 403 a un CLIENT', async () => {

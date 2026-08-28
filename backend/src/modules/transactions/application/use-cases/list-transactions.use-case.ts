@@ -4,7 +4,7 @@ import {
   ITransactionRepository,
   TRANSACTION_REPOSITORY,
 } from '../../domain/ports/transaction.repository.port';
-import { Transaction } from '../../domain/entities/transaction.entity';
+import { TransactionWithAccounts } from '../../domain/entities/transaction.entity';
 
 export interface ListTransactionsCommand {
   page: number;
@@ -15,7 +15,7 @@ export interface ListTransactionsCommand {
 }
 
 export interface ListTransactionsResult {
-  data: Transaction[];
+  data: TransactionWithAccounts[];
   page: number;
   limit: number;
   total: number;

@@ -1,9 +1,9 @@
-import { TransactionStatus } from '@prisma/client';
+import { AccountType, TransactionStatus } from '@prisma/client';
 import { ListTransactionsUseCase } from './list-transactions.use-case';
 import { ITransactionRepository } from '../../domain/ports/transaction.repository.port';
-import { Transaction } from '../../domain/entities/transaction.entity';
+import { TransactionWithAccounts } from '../../domain/entities/transaction.entity';
 
-function makeTx(overrides: Partial<Transaction> = {}): Transaction {
+function makeTx(overrides: Partial<TransactionWithAccounts> = {}): TransactionWithAccounts {
   return {
     id: 'tx-1',
     originAccountId: 'acc-1',
@@ -13,6 +13,18 @@ function makeTx(overrides: Partial<Transaction> = {}): Transaction {
     authorizationCode: 'CODE1234567',
     status: TransactionStatus.COMPLETED,
     createdAt: new Date('2026-08-27T00:00:00.000Z'),
+    originAccount: {
+      accountNumber: '1000000001',
+      accountType: AccountType.BASIC,
+      ownerEmail: 'origin@findash.dev',
+      ownerDocumentNumber: 'DOC-ORIGIN',
+    },
+    destAccount: {
+      accountNumber: '1000000002',
+      accountType: AccountType.PREMIUM,
+      ownerEmail: 'dest@findash.dev',
+      ownerDocumentNumber: 'DOC-DEST',
+    },
     ...overrides,
   };
 }

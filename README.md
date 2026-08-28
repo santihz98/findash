@@ -81,10 +81,24 @@ npm run start:dev
 
 ### Probar Auth (Sesión 2) con curl
 
-Requiere la base sembrada (`npm run prisma:migrate:deploy && npm run prisma:seed`, o `npx prisma db seed` — crea los 4 usuarios de demo, uno por rol/tipo de cuenta). Password de todos: `Demo1234!`.
+Requiere la base sembrada (`npm run prisma:migrate:deploy && npm run prisma:seed`, o `npx prisma db seed` — crea los 10 usuarios de demo: 1 ADMIN + 9 CLIENT, 3 por tipo de cuenta desde la Sesión 26). Password de todos: `Demo1234!`.
+
+| Usuario | Documento | Tipo de cuenta | Cuenta | Saldo inicial |
+|---|---|---|---|---|
+| `admin@findash.dev` | 1010000001 | — (ADMIN) | — | — |
+| `basic@findash.dev` | 1010000002 | BASIC | 1000000001 | $1000.00 |
+| `premium@findash.dev` | 1010000003 | PREMIUM | 1000000002 | $1000.00 |
+| `corporate@findash.dev` | 1010000004 | CORPORATE | 1000000003 | $1000.00 |
+| `basic2@findash.dev` | 1010000005 | BASIC | 1000000004 | $250.75 |
+| `basic3@findash.dev` | 1010000006 | BASIC | 1000000005 | $5230.00 |
+| `premium2@findash.dev` | 1010000007 | PREMIUM | 1000000006 | $820.40 |
+| `premium3@findash.dev` | 1010000008 | PREMIUM | 1000000007 | $15320.90 |
+| `corporate2@findash.dev` | 1010000009 | CORPORATE | 1000000008 | $3200.00 |
+| `corporate3@findash.dev` | 1010000010 | CORPORATE | 1000000009 | $97500.00 |
 
 ```bash
 # Login — probar con admin@findash.dev / basic@findash.dev / premium@findash.dev / corporate@findash.dev
+# (o cualquiera de los 6 usuarios adicionales de la Sesión 26 — misma tabla de arriba)
 curl -s -X POST http://localhost:3000/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"admin@findash.dev","password":"Demo1234!"}'
@@ -214,6 +228,11 @@ curl -s -w "\n%{http_code}\n" -X POST http://localhost:3000/transactions/transfe
 
 `GET /transactions/me` es solo-CLIENT: historial de la cuenta del usuario autenticado, enviadas Y recibidas (campo `direction`: `SENT`/`RECEIVED`, relativo a esa cuenta), incluidos los intentos REJECTED/FAILED — no solo los COMPLETED. `GET /transactions` es solo-ADMIN: TODAS las transacciones de la plataforma, sin scope de cuenta, filtrables por `status` y/o rango de fechas (`dateFrom`/`dateTo`, ISO 8601, combinables entre sí y con `status`). Paginación real (`page`/`limit`, mismos límites que `GET /accounts`: `limit` máximo 100, rechazado con 400 si se excede).
 
+**Enriquecido con datos de cuenta (Sesión 26):** antes de esta sesión, cada fila solo traía `originAccountId`/`destAccountId` como UUIDs — un ADMIN auditando no tenía forma de saber QUÉ usuario ni QUÉ tipo de cuenta hizo cada transferencia sin ir a buscarlo a mano en `GET /accounts`. Vía `include` relacional de Prisma (una sola query, sin N+1):
+
+- `GET /transactions` (ADMIN): cada fila trae `originAccount` (siempre presente) y `destAccount` (`null` cuando el destino no se confirmó, mismo criterio que `destAccountId` desde la Sesión 6.5) — cada uno con `accountNumber`/`accountType` **y** `ownerEmail`/`ownerDocumentNumber`. No es información nueva: el ADMIN ya tiene acceso a esos mismos datos vía `GET /accounts` (Sesión 3), esto los une en un solo request.
+- `GET /transactions/me` (CLIENT): cada fila trae `counterpartyAccount` (la cuenta que NO es la propia — `accountNumber`/`accountType`, `null` cuando esa cuenta no está confirmada) — **nunca** `ownerEmail`/`ownerDocumentNumber` de la contraparte, mismo criterio de privacidad que `GET /accounts/lookup` (Sesión 19): un CLIENT puede saber CON QUÉ TIPO de cuenta operó, nunca QUIÉN es la persona detrás.
+
 ```bash
 BASIC_TOKEN=$(curl -s -X POST http://localhost:3000/auth/login \
   -H "Content-Type: application/json" \
@@ -224,13 +243,24 @@ ADMIN_TOKEN=$(curl -s -X POST http://localhost:3000/auth/login \
 
 # Historial propio, paginado (defaults: page=1, limit=20)
 curl -s http://localhost:3000/transactions/me -H "Authorization: Bearer $BASIC_TOKEN"
-# → {"data":[{"id":"...","direction":"SENT","status":"COMPLETED",...}, ...],"page":1,"limit":20,"total":N,"totalPages":M}
+# → {"data":[{"id":"...","direction":"SENT","status":"COMPLETED",...,
+#             "counterpartyAccount":{"accountNumber":"1000000002","accountType":"PREMIUM"}}, ...],
+#    "page":1,"limit":20,"total":N,"totalPages":M}
+
+# Confirmar que /transactions/me NUNCA expone email/documentNumber de la contraparte
+curl -s http://localhost:3000/transactions/me -H "Authorization: Bearer $BASIC_TOKEN" | grep -i "email\|documentNumber"
+# → sin salida (grep no encuentra nada) — si esto imprimiera algo, sería una fuga real
 
 # Un ADMIN no puede pedir el historial "de cuenta" (403) — /transactions/me es solo-CLIENT
 curl -s -w "\n%{http_code}\n" http://localhost:3000/transactions/me -H "Authorization: Bearer $ADMIN_TOKEN"
 
-# Auditoría completa (solo ADMIN) — TODAS las transacciones de la plataforma
+# Auditoría completa (solo ADMIN) — TODAS las transacciones de la plataforma,
+# con email/tipo de cuenta real de ambas partes
 curl -s "http://localhost:3000/transactions?limit=5" -H "Authorization: Bearer $ADMIN_TOKEN"
+# → {"data":[{"id":"...","status":"COMPLETED",...,
+#             "originAccount":{"accountNumber":"1000000001","accountType":"BASIC","ownerEmail":"basic@findash.dev","ownerDocumentNumber":"1010000002"},
+#             "destAccount":{"accountNumber":"1000000002","accountType":"PREMIUM","ownerEmail":"premium@findash.dev","ownerDocumentNumber":"1010000003"}}, ...],
+#    "page":1,"limit":5,"total":N,"totalPages":M}
 
 # Un CLIENT recibe 403 acá — GET /transactions es solo-ADMIN
 curl -s -w "\n%{http_code}\n" http://localhost:3000/transactions -H "Authorization: Bearer $BASIC_TOKEN"
@@ -352,7 +382,7 @@ DATABASE_URL="postgresql://findash_app:LA_PASSWORD_REAL@findash-db.c3iyyk8209g1.
 
 > Recupera la password real (no quedó en ningún archivo del repo, `aws-setup.sh` la generó al vuelo con `openssl rand`) desde el secreto `DATABASE_URL` en Secrets Manager: `aws secretsmanager get-secret-value --secret-id findash/DATABASE_URL --region us-east-2 --query SecretString --output text`.
 
-Ya ejecutado en producción: las 3 migraciones (`domain_model`, `add_user_document_number`, `audit_rejected_failed_transactions`) se aplicaron limpio contra la RDS real, y `prisma db seed` corrió sobre la misma base — los 4 usuarios de demo (`admin`/`basic`/`premium`/`corporate@findash.dev`) existen en producción.
+Ya ejecutado en producción: las 3 migraciones (`domain_model`, `add_user_document_number`, `audit_rejected_failed_transactions`) se aplicaron limpio contra la RDS real, y `prisma db seed` corrió sobre la misma base — los 4 usuarios de demo (`admin`/`basic`/`premium`/`corporate@findash.dev`) existen en producción. **Pendiente tras esta sesión (26):** el seed se extendió a 10 usuarios (ver tabla de la sección "Probar Auth" arriba) — falta correr `npx prisma db seed` de nuevo contra la RDS real (el pipeline nunca lo ejecuta automáticamente, mismo criterio de siempre) para que los 6 usuarios nuevos existan en producción; el `upsert` por `email`/`accountNumber` hace que sea seguro correrlo de nuevo sin duplicar ni tocar los 4 que ya estaban.
 
 ### 3. Servicio ECS Fargate (ya creado — `ecs-setup.sh`, reemplaza al paso de App Runner)
 

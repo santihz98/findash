@@ -7,7 +7,7 @@ import {
   ITransactionRepository,
   TRANSACTION_REPOSITORY,
 } from '../../domain/ports/transaction.repository.port';
-import { TransactionWithDirection } from '../../domain/entities/transaction.entity';
+import { TransactionWithCounterparty } from '../../domain/entities/transaction.entity';
 import { NoOriginAccountException } from '../../domain/exceptions/no-origin-account.exception';
 
 export interface ListMyTransactionsCommand {
@@ -19,7 +19,7 @@ export interface ListMyTransactionsCommand {
 }
 
 export interface ListMyTransactionsResult {
-  data: TransactionWithDirection[];
+  data: TransactionWithCounterparty[];
   page: number;
   limit: number;
   total: number;
