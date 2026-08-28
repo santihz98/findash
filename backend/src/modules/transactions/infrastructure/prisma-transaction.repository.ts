@@ -70,7 +70,19 @@ export class PrismaTransactionRepository implements ITransactionRepository {
         where,
         skip: (filter.page - 1) * filter.limit,
         take: filter.limit,
-        orderBy: { createdAt: 'desc' },
+        // [createdAt desc, id asc] (Sesión 20): más reciente primero es el
+        // orden correcto para un historial, pero createdAt solo no es
+        // `@unique` — dos transferencias creadas en el mismo milisegundo
+        // (fácil bajo test, no imposible en producción) son un empate real
+        // sin ORDER BY, y Postgres no promete ningún orden estable entre
+        // ellas de una llamada a otra bajo LIMIT/OFFSET (páginas que se
+        // solapan o dejan huecos). `id` (PK, único) como segundo criterio
+        // desempata sin alterar el orden por fecha que sí importa acá —
+        // a diferencia de `Account.accountNumber`, `Transaction` no tiene
+        // ningún identificador de negocio legible que sirva de orden
+        // primario, así que el desempate usa la PK en vez de reemplazar el
+        // criterio principal.
+        orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
       }),
       this.prisma.transaction.count({ where }),
     ]);
@@ -108,7 +120,10 @@ export class PrismaTransactionRepository implements ITransactionRepository {
         where,
         skip: (filter.page - 1) * filter.limit,
         take: filter.limit,
-        orderBy: { createdAt: 'desc' },
+        // Ver comentario de orderBy en findManyByAccountId (mismo criterio,
+        // mismo motivo: desempate determinístico con `id` sobre un
+        // `createdAt` no-único).
+        orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
       }),
       this.prisma.transaction.count({ where }),
     ]);

@@ -154,6 +154,61 @@ describe('PrismaAccountRepository (integración real contra Postgres)', () => {
     expect(new Set(allIds).size).toBe(5); // sin duplicados ni huecos entre páginas
   });
 
+  // Sesión 20: lo de arriba prueba que la paginación no duplica/deja huecos
+  // (correctness de skip/take), pero no que el ORDEN en sí sea el esperado
+  // — antes de esta sesión, `orderBy: { createdAt: 'desc' }` no garantizaba
+  // ningún orden estable entre filas con el mismo timestamp (empate real,
+  // fácil bajo un `createMany` como el de este fixture, que inserta las 25
+  // cuentas en la misma transacción). Este test crea cuentas propias
+  // insertadas deliberadamente FUERA de orden alfabético (C, A, B) — si el
+  // resultado viniera ordenado por orden de inserción (o por cualquier otra
+  // cosa que no sea `accountNumber` real), esta aserción fallaría.
+  it('orden explícito: accountNumber ASC, no el orden de inserción ni un empate de createdAt sin desempate', async () => {
+    const orderUser = await prisma.user.create({
+      data: {
+        email: 'test-repo-order@findash.dev',
+        documentNumber: 'TESTDOC-ORDER-0001',
+        passwordHash: 'irrelevant-for-this-test',
+        role: 'CLIENT',
+      },
+    });
+
+    // Insertadas C, A, B a propósito — y las 3 con el MISMO `balance` para
+    // que no haya ninguna otra columna que "accidentalmente" coincida con
+    // el orden esperado salvo `accountNumber`.
+    await prisma.account.createMany({
+      data: [
+        { userId: orderUser.id, accountNumber: 'TESTACC-ORDER-C', balance: '1.00', accountType: 'BASIC', status: 'ACTIVE' },
+        { userId: orderUser.id, accountNumber: 'TESTACC-ORDER-A', balance: '1.00', accountType: 'BASIC', status: 'ACTIVE' },
+        { userId: orderUser.id, accountNumber: 'TESTACC-ORDER-B', balance: '1.00', accountType: 'BASIC', status: 'ACTIVE' },
+      ],
+    });
+
+    const result = await repository.findManyWithOwner({
+      page: 1,
+      limit: 10,
+      documentNumber: 'TESTDOC-ORDER-0001',
+    });
+
+    expect(result.data.map((a) => a.accountNumber)).toEqual([
+      'TESTACC-ORDER-A',
+      'TESTACC-ORDER-B',
+      'TESTACC-ORDER-C',
+    ]);
+
+    // Estable en múltiples llamadas consecutivas (mismo criterio de
+    // aceptación que se verificó con curl contra el backend real).
+    const repeated = await repository.findManyWithOwner({
+      page: 1,
+      limit: 10,
+      documentNumber: 'TESTDOC-ORDER-0001',
+    });
+    expect(repeated.data.map((a) => a.accountNumber)).toEqual(result.data.map((a) => a.accountNumber));
+
+    await prisma.account.deleteMany({ where: { userId: orderUser.id } });
+    await prisma.user.deleteMany({ where: { id: orderUser.id } });
+  });
+
   it('serializa balance como string exacto (sin redondeo de punto flotante)', async () => {
     const result = await repository.findManyWithOwner({ page: 1, limit: 100, documentNumber: 'TESTDOC-A' });
     const account = result.data.find((a) => a.accountNumber === 'TESTACC-A-0001');
@@ -187,6 +242,38 @@ describe('PrismaAccountRepository (integración real contra Postgres)', () => {
       'TESTACC-A-0002',
       'TESTACC-A-0003',
     ]);
+  });
+
+  // Sesión 20: mismo criterio de orden que findManyWithOwner (usado por
+  // GET /accounts/me) — insertadas fuera de orden alfabético a propósito.
+  it('findManyByUserId también respeta accountNumber ASC, no el orden de inserción', async () => {
+    const orderUser = await prisma.user.create({
+      data: {
+        email: 'test-repo-order-me@findash.dev',
+        documentNumber: 'TESTDOC-ORDERME-0001',
+        passwordHash: 'irrelevant-for-this-test',
+        role: 'CLIENT',
+      },
+    });
+
+    await prisma.account.createMany({
+      data: [
+        { userId: orderUser.id, accountNumber: 'TESTACC-ORDERME-C', balance: '1.00', accountType: 'BASIC', status: 'ACTIVE' },
+        { userId: orderUser.id, accountNumber: 'TESTACC-ORDERME-A', balance: '1.00', accountType: 'BASIC', status: 'ACTIVE' },
+        { userId: orderUser.id, accountNumber: 'TESTACC-ORDERME-B', balance: '1.00', accountType: 'BASIC', status: 'ACTIVE' },
+      ],
+    });
+
+    const result = await repository.findManyByUserId(orderUser.id);
+
+    expect(result.map((a) => a.accountNumber)).toEqual([
+      'TESTACC-ORDERME-A',
+      'TESTACC-ORDERME-B',
+      'TESTACC-ORDERME-C',
+    ]);
+
+    await prisma.account.deleteMany({ where: { userId: orderUser.id } });
+    await prisma.user.deleteMany({ where: { id: orderUser.id } });
   });
 
   it('findById trae la cuenta por id, sin trx (usada por CreateTransferUseCase, Sesión 4)', async () => {

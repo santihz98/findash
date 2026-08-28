@@ -198,6 +198,42 @@ describe('PrismaTransactionRepository (integración real contra Postgres)', () =
       await prisma.user.deleteMany({ where: { id: otherUser.id } });
     });
 
+    // Sesión 20: `createdAt` NO es `@unique` — dos transferencias con el
+    // MISMO timestamp exacto (empate real, forzado acá vía `prisma.
+    // transaction.create` directo para controlar `createdAt`, algo que la
+    // interfaz del repositorio no expone) no tenían antes ningún criterio
+    // de desempate, así que el orden entre ellas no estaba garantizado de
+    // una llamada a otra. `id` explícito (fuera de orden a propósito: C,
+    // A, B) como segundo criterio de `orderBy` lo resuelve.
+    it('orden explícito ante un empate real de createdAt: id ASC como desempate determinístico', async () => {
+      const tiedAt = new Date('2020-03-14T00:00:00.000Z');
+      const rows = [
+        { id: 'txrepotest-order-c', authorizationCode: 'TXREPOTEST-ORDER-C', idempotencyKey: 'txrepotest-order-key-c' },
+        { id: 'txrepotest-order-a', authorizationCode: 'TXREPOTEST-ORDER-A', idempotencyKey: 'txrepotest-order-key-a' },
+        { id: 'txrepotest-order-b', authorizationCode: 'TXREPOTEST-ORDER-B', idempotencyKey: 'txrepotest-order-key-b' },
+      ];
+      for (const row of rows) {
+        await prisma.transaction.create({
+          data: {
+            id: row.id,
+            originAccountId,
+            destAccountId,
+            amount: '1.00',
+            commission: '0.00',
+            authorizationCode: row.authorizationCode,
+            idempotencyKey: row.idempotencyKey,
+            status: 'COMPLETED',
+            createdAt: tiedAt,
+          },
+        });
+      }
+
+      const result = await repository.findManyByAccountId({ accountId: originAccountId, page: 1, limit: 100 });
+      const tied = result.data.filter((t) => t.id.startsWith('txrepotest-order-'));
+
+      expect(tied.map((t) => t.id)).toEqual(['txrepotest-order-a', 'txrepotest-order-b', 'txrepotest-order-c']);
+    });
+
     it('devuelve página vacía (data: [], total: 0) para una cuenta sin ninguna transacción', async () => {
       const lonelyUser = await prisma.user.create({
         data: {
@@ -278,6 +314,59 @@ describe('PrismaTransactionRepository (integración real contra Postgres)', () =
       const result = await repository.findManyAdmin({ page: 1, limit: 5 });
       expect(Array.isArray(result.data)).toBe(true);
       expect(result.total).toBeGreaterThanOrEqual(result.data.length);
+    });
+
+    // Sesión 20: mismo desempate que findManyByAccountId, acá contra la
+    // query GLOBAL sin scope de cuenta. Se aísla con dateFrom/dateTo
+    // exactos sobre un `createdAt` sintético que no colisiona con ningún
+    // dato real (2020, muy anterior a cualquier dato de seed/demo/tests).
+    it('orden explícito ante un empate real de createdAt: id ASC como desempate determinístico', async () => {
+      const tiedAt = new Date('2020-03-15T00:00:00.000Z');
+      const rows = [
+        {
+          id: 'txrepotest-adminorder-c',
+          authorizationCode: 'TXREPOTEST-ADMINORDER-C',
+          idempotencyKey: 'txrepotest-adminorder-key-c',
+        },
+        {
+          id: 'txrepotest-adminorder-a',
+          authorizationCode: 'TXREPOTEST-ADMINORDER-A',
+          idempotencyKey: 'txrepotest-adminorder-key-a',
+        },
+        {
+          id: 'txrepotest-adminorder-b',
+          authorizationCode: 'TXREPOTEST-ADMINORDER-B',
+          idempotencyKey: 'txrepotest-adminorder-key-b',
+        },
+      ];
+      for (const row of rows) {
+        await prisma.transaction.create({
+          data: {
+            id: row.id,
+            originAccountId,
+            destAccountId,
+            amount: '1.00',
+            commission: '0.00',
+            authorizationCode: row.authorizationCode,
+            idempotencyKey: row.idempotencyKey,
+            status: 'COMPLETED',
+            createdAt: tiedAt,
+          },
+        });
+      }
+
+      const result = await repository.findManyAdmin({
+        page: 1,
+        limit: 100,
+        dateFrom: tiedAt,
+        dateTo: tiedAt,
+      });
+
+      expect(result.data.map((t) => t.id)).toEqual([
+        'txrepotest-adminorder-a',
+        'txrepotest-adminorder-b',
+        'txrepotest-adminorder-c',
+      ]);
     });
   });
 });

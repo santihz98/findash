@@ -39,12 +39,25 @@ export class PrismaAccountRepository implements IAccountRepository {
     // la tabla completa a memoria para recortarla en JS. `$transaction` con
     // dos queries (fila + count) para que el total sea consistente con el
     // mismo `where` en el mismo snapshot, sin dos round-trips no atómicos.
+    //
+    // orderBy: accountNumber ASC (Sesión 20), no createdAt — createdAt NO
+    // es `@unique` en el schema, así que dos cuentas creadas en el mismo
+    // milisegundo (ej. el seed de demo, que las crea en la misma corrida)
+    // son un empate real para Postgres, que no garantiza ningún orden
+    // estable entre ellas de una llamada a otra bajo LIMIT/OFFSET — dos
+    // páginas consecutivas podrían solaparse o dejar huecos sin que el
+    // `where` haya cambiado. `accountNumber` sí es `@unique`
+    // (prisma/schema.prisma), así que ordenar por esa columna sola ya
+    // garantiza un orden total determinístico, sin necesidad de un segundo
+    // criterio de desempate — y de paso es el criterio de navegación más
+    // natural para un ADMIN escaneando el listado (mismo identificador de
+    // negocio que ve en `accountNumber`, no un timestamp interno).
     const [rows, total] = await this.prisma.$transaction([
       this.prisma.account.findMany({
         where,
         skip: (filter.page - 1) * filter.limit,
         take: filter.limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: { accountNumber: 'asc' },
         include: { user: { select: { documentNumber: true, email: true } } },
       }),
       this.prisma.account.count({ where }),
@@ -74,9 +87,12 @@ export class PrismaAccountRepository implements IAccountRepository {
   }
 
   async findManyByUserId(userId: string): Promise<Account[]> {
+    // Mismo criterio de orden que findManyWithOwner (ver ese comentario) —
+    // no está paginado (sin skip/take), pero el mismo empate de createdAt
+    // sin desempate igual produce un orden inestable entre llamadas.
     const rows = await this.prisma.account.findMany({
       where: { userId },
-      orderBy: { createdAt: 'desc' },
+      orderBy: { accountNumber: 'asc' },
     });
 
     return rows.map(
